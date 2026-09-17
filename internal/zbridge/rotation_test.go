@@ -98,3 +98,59 @@ func errFromString(s string) error { return &plainErr{s} }
 type plainErr struct{ msg string }
 
 func (e *plainErr) Error() string { return e.msg }
+
+// TestNextZAIAccountProactive verifies the proactive per-request rotation hook
+// (issue #47): consecutive nextZAIAccount() calls alternate across accounts so
+// consecutive requests spread load evenly instead of sticking to one account.
+func TestNextZAIAccountProactive(t *testing.T) {
+	old := config.ZaiTokens
+	defer func() { config.ZaiTokens = old }()
+	config.ZaiTokens = []string{"tok-A", "tok-B"}
+
+	session.mu.Lock()
+	session.tokenIndex = 0
+	session.Token = ""
+	session.Initialized = true
+	session.mu.Unlock()
+
+	seen := map[string]int{}
+	for i := 0; i < 4; i++ {
+		nextZAIAccount()
+		tok := func() string { session.mu.Lock(); defer session.mu.Unlock(); return session.Token }()
+		seen[tok]++
+		if session.Initialized {
+			t.Fatalf("proactive rotate %d: expected forced re-init (Initialized=false), got true", i)
+		}
+	}
+	// Round-robin over 2 accounts x 4 calls => 2 each.
+	if seen["tok-A"] != 2 || seen["tok-B"] != 2 {
+		t.Fatalf("proactive rotation not even: got %v", seen)
+	}
+}
+
+// TestNextZAIAccountSingleIsNoop ensures single-token deployments are not
+// impacted by the proactive hook.
+func TestNextZAIAccountSingleIsNoop(t *testing.T) {
+	old := config.ZaiTokens
+	defer func() { config.ZaiTokens = old }()
+	config.ZaiTokens = []string{"only-tok"}
+
+	session.mu.Lock()
+	session.tokenIndex = 5
+	session.Token = "only-tok"
+	session.Initialized = true
+	session.mu.Unlock()
+
+	nextZAIAccount()
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.Token != "only-tok" {
+		t.Fatalf("single-token proactive rotate changed token to %q", session.Token)
+	}
+	if !session.Initialized {
+		t.Fatal("single-token proactive rotate must NOT force re-init")
+	}
+	if session.tokenIndex != 5 {
+		t.Fatalf("single-token proactive rotate changed index to %d", session.tokenIndex)
+	}
+}

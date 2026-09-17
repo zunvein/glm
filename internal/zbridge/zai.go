@@ -452,6 +452,16 @@ func sendToZAIStream(prompt string, opts struct {
 	//                        with an incremental backoff 0.5–1.5 s before it.
 	const maxAttempts = 5
 
+	// Issue #47: proactive per-request account rotation. Instead of only
+	// swapping accounts when a concurrency/rate error forces a retry, we
+	// advance to the next Z.AI account on EVERY incoming request so the load
+	// is spread evenly across all ZAI_TOKENS accounts (avoids hammering a
+	// single account during bursts). This is a single no-op with one token.
+	// We advance only on the first attempt of the loop; retry-time rotation
+	// (rotateToken below) continues to advance on subsequent attempts, so we
+	// never skip two accounts for a single error.
+	nextZAIAccount()
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Issue #41: while the breaker believes the egress IP is blocked by
 		// the Aliyun WAF, do not spend a captcha (each costs a harvested
@@ -648,6 +658,42 @@ func sendToZAIStream(prompt string, opts struct {
 		return err
 	}
 	return errors.New("Max retries exceeded")
+}
+
+// selectZAIAccount advances the round-robin index one step and installs the
+// corresponding token (and its decoded identity) as the active session
+// account. With a single config.ZaiToken it is a no-op. It also forces a
+// session re-init when initialized so the newly selected account's identity
+// (user id, user name) is picked up by the next request.
+func selectZAIAccount() {
+	session.mu.Lock()
+	n := len(config.ZaiTokens)
+	if n > 1 {
+		session.tokenIndex++
+		idx := session.tokenIndex % n
+		session.Token = config.ZaiTokens[idx]
+		id, name := decodeJWT(session.Token)
+		if id != "" {
+			session.UserID = id
+		}
+		if name != "" {
+			session.UserName = name
+		}
+		// Force re-init so the newly selected account's identity is used.
+		session.Initialized = false
+	}
+	session.mu.Unlock()
+}
+
+// nextZAIAccount is the proactive per-request rotation hook (issue #47). It
+// advances the round-robin index so consecutive requests alternate across the
+// configured ZAI_TOKENS accounts, spreading the upstream load evenly instead
+// of letting one account absorb a burst. Rotation done on error (see
+// rotateToken) advances again, which is exactly what we want — with the
+// per-request advance happening first, an error-triggered retry only moves to
+// the account that would have been next anyway.
+func nextZAIAccount() {
+	selectZAIAccount()
 }
 
 // rotateToken advances the active Z.AI account to the next token in the
