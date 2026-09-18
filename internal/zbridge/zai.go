@@ -161,9 +161,15 @@ func initializeSession() error {
 		// Multi-account mode: round-robin across ZAI_TOKENS; single ZAI_TOKEN
 		// falls through to the legacy path below.
 		if len(config.ZaiTokens) > 0 {
+			// Select the account pointed at by the current round-robin
+			// cursor WITHOUT advancing it — advancing is the sole job of
+			// selectZAIAccount (proactive per-request rotation, issue #47).
+			// Keeping the cursor stable here makes initializeSession
+			// idempotent w.r.t. rotation, so a re-entry triggered by
+			// initialization after a rotation does not double-advance and
+			// skip to a wrong account.
 			session.mu.Lock()
 			idx := session.tokenIndex % len(config.ZaiTokens)
-			session.tokenIndex++
 			tok := config.ZaiTokens[idx]
 			session.mu.Unlock()
 			session.Token = tok
@@ -662,9 +668,13 @@ func sendToZAIStream(prompt string, opts struct {
 
 // selectZAIAccount advances the round-robin index one step and installs the
 // corresponding token (and its decoded identity) as the active session
-// account. With a single config.ZaiToken it is a no-op. It also forces a
-// session re-init when initialized so the newly selected account's identity
-// (user id, user name) is picked up by the next request.
+// account. With a single config.ZaiToken it is a no-op. It intentionally does
+// NOT touch session.Initialized: for configured-token deployments there is no
+// guest handshake to redo, so clearing it here would make initializeSession
+// re-run on every request and — because init would select the same cursor
+// again — could double-advance the rotation on re-entry (issue #47 fix).
+// rotateToken keeps forcing a re-init, which is correct on the error/retry
+// path where a fresh upstream handle is actually wanted.
 func selectZAIAccount() {
 	session.mu.Lock()
 	n := len(config.ZaiTokens)
@@ -679,8 +689,6 @@ func selectZAIAccount() {
 		if name != "" {
 			session.UserName = name
 		}
-		// Force re-init so the newly selected account's identity is used.
-		session.Initialized = false
 	}
 	session.mu.Unlock()
 }
@@ -694,6 +702,17 @@ func selectZAIAccount() {
 // the account that would have been next anyway.
 func nextZAIAccount() {
 	selectZAIAccount()
+	if n := len(config.ZaiTokens); n > 1 {
+		session.mu.Lock()
+		idx := session.tokenIndex % n
+		uid := session.UserID
+		session.mu.Unlock()
+		preview := uid
+		if len(preview) > 8 {
+			preview = preview[:8]
+		}
+		log.Printf("[API] per-request account -> idx %d/%d (%s)", idx, n, preview)
+	}
 }
 
 // rotateToken advances the active Z.AI account to the next token in the

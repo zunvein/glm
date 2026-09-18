@@ -116,10 +116,13 @@ func TestNextZAIAccountProactive(t *testing.T) {
 	seen := map[string]int{}
 	for i := 0; i < 4; i++ {
 		nextZAIAccount()
-		tok := func() string { session.mu.Lock(); defer session.mu.Unlock(); return session.Token }()
+		session.mu.Lock()
+		tok := session.Token
+		inited := session.Initialized
+		session.mu.Unlock()
 		seen[tok]++
-		if session.Initialized {
-			t.Fatalf("proactive rotate %d: expected forced re-init (Initialized=false), got true", i)
+		if !inited {
+			t.Fatalf("proactive rotate %d: must NOT force re-init (Initialized should stay true), got false", i)
 		}
 	}
 	// Round-robin over 2 accounts x 4 calls => 2 each.
@@ -153,4 +156,62 @@ func TestNextZAIAccountSingleIsNoop(t *testing.T) {
 	if session.tokenIndex != 5 {
 		t.Fatalf("single-token proactive rotate changed index to %d", session.tokenIndex)
 	}
+}
+
+// TestNoDoubleAdvanceOnReinit guards against the issue-#47 regression where a
+// proactive nextZAIAccount() (which advances the cursor and selects an
+// account) followed by an initializeSession() re-entry (which used to advance
+// the cursor AGAIN when selecting) caused every request to land on the same
+// account at an even cursor. After the fix, initializeSession only SELECTS
+// the account at the current cursor and never advances it, so rotate→reinit
+// yields the same account — no skip.
+func TestNoDoubleAdvanceOnReinit(t *testing.T) {
+	old := config.ZaiTokens
+	defer func() { config.ZaiTokens = old }()
+	config.ZaiTokens = []string{"tok-A", "tok-B"}
+
+	session.mu.Lock()
+	session.tokenIndex = 0
+	session.Token = ""
+	session.Initialized = false
+	session.mu.Unlock()
+
+	// Simulate the request path: proactive rotation then a re-init that
+	// initializeSession performs on an uninitialized session.
+	const requests = 6
+	got := make([]string, 0, requests)
+	for i := 0; i < requests; i++ {
+		nextZAIAccount() // proactive advance (issue #47)
+		session.mu.Lock()
+		needInit := !session.Initialized
+		session.mu.Unlock()
+		if needInit {
+			if err := initializeSession(); err != nil {
+				t.Fatalf("initializeSession: %v", err)
+			}
+		}
+		session.mu.Lock()
+		got = append(got, session.Token)
+		session.mu.Unlock()
+	}
+	// With two accounts and no double advance we must alternate A,B,A,B,...
+	for i := 1; i < len(got); i++ {
+		if got[i] == got[i-1] {
+			t.Fatalf("double-advance: consecutive requests used same account: %v", got)
+		}
+	}
+	// Even distribution across the two accounts.
+	a, b := 0, 0
+	for _, g := range got {
+		switch g {
+		case "tok-A":
+			a++
+		case "tok-B":
+			b++
+		}
+	}
+	if a != 3 || b != 3 {
+		t.Fatalf("uneven distribution: A=%d B=%d (got=%v)", a, b, got)
+	}
+	t.Logf("alternating accounts OK: %v", got)
 }
