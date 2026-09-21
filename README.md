@@ -4,6 +4,20 @@ An OpenAI- **and Anthropic-compatible** API proxy for [chat.z.ai](https://chat.z
 
 ---
 
+## ☕ Full credits & acknowledgment
+
+This project is a **fork** of [**GLM-Free-API**](https://github.com/izaart95-jpg/GLM-Free-API) by [**izaart95-jpg**](https://github.com/izaart95-jpg) (Lelouch). The vast majority of the code — the OpenAI/Anthropic proxy core, vision support, token collector, Aliyun captcha machinery, agent mode, session pool, and all research assets — comes **directly from the original project**, and all credit for it goes to the original author.
+
+This fork only makes a **small set of additive tweaks** on top:
+
+- **Multi-account rotation** — a `ZAI_TOKENS` env var that round-robins requests across several Z.AI accounts per-call (spreads per-account/per-model concurrency limits). See [Multi-account rotation](#multi-account-rotation-zai_tokens).
+- **Upstream pacing** — an optional shared gate (`UPSTREAM_MIN_INTERVAL_MS`) that enforces a minimum gap between requests to Z.AI / Aliyun so bursts don't trip the WAF.
+- A couple of small fixes/observability tweaks for the rotation path.
+
+Everything else is the original author's work. **Respect the upstream license and the original author's effort.** If you use or redistribute this fork, keep the credit to `izaart95-jpg` and the link above.
+
+---
+
 ## Features
 
 - **Dual protocol** — OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` on one server; streaming (SSE, 5 s keep-alive pings) and non-streaming
@@ -539,4 +553,4 @@ Run the suite: `go test ./...`
 
 ## License
 
-Provided under MIT License. Use responsibly and in accordance with Z.AI's terms of service.
+This project is a fork and inherits the original project's license. Licensed under the **MIT License** (see [`LICENSE`](LICENSE), originally © 2026 Lelouch / [izaart95-jpg](https://github.com/izaart95-jpg)). Use responsibly and in accordance with Z.AI's terms of service.
