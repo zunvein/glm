@@ -2,8 +2,6 @@
 
 An OpenAI- **and Anthropic-compatible** API proxy for [chat.z.ai](https://chat.z.ai). Drop it in front of any OpenAI/Anthropic-compatible tool and use Z.AI's GLM models — pure HTTP, no browser automation at runtime.
 
-**Hosted instance:** `https://glm.cognix.sryze.cc/v1` — auth `Waguri` (Bearer or `x-api-key`), runs agent mode, supports `glm-5.2` and `glm-5.3-flash`. OpenAI endpoint recommended; Anthropic works but is primitive.
-
 ---
 
 ## Features
@@ -17,6 +15,7 @@ An OpenAI- **and Anthropic-compatible** API proxy for [chat.z.ai](https://chat.z
 - **Per-model feature resolution** — resolved from Z.AI server capabilities with stored per-model overrides; `image_generation` is **always forced `false`**; `reasoning_effort` (`high`/`max`) forwarded only when the model supports it (forces `enable_thinking=true`)
 - **Live model list** — full catalog from Z.AI `/api/models` (cached 5 min, static fallback) with OpenAI-style `architecture`/modality on `/v1/models`
 - **Token pool** — device tokens harvested via `cmd/token-collector` into `tokens.sqlite`, consumed FIFO and deleted after use (up to 5 retries per captcha)
+- **Multi-account rotation** — set `ZAI_TOKENS` to a comma-separated list of Z.AI account JWTs and requests are round-robined across them per-call. This spreads the per-account / per-model concurrency limits that make Z.AI answer bursts with "Model is currently at capacity", and lets several accounts share the load with no code changes (any `N >= 1`)
 - **Background captcha cache** — with agent mode on, captcha params are pre-generated asynchronously (2 cached, 75 s TTL, auto-pauses after 3 min idle)
 - **Graceful shutdown** — CTRL+C/SIGTERM drains in-flight requests (10 s), then deletes every remaining pooled session on Z.AI before exiting (second CTRL+C force-exits)
 
@@ -81,24 +80,50 @@ Text-only models report `"modality": "text->text"` / `"input_modalities": ["text
 
 ```bash
 # 1. Clone
-git clone https://github.com/izaart95-jpg/GLM-Free-API/ zai-api && cd zai-api
+git clone https://github.com/zunvein/glm/ && cd glm
 
 # 2. Initialize the Go module (repo ships without go.mod by design)
-go mod init zai-api && go mod tidy
+go mod init glm && go mod tidy
 
-# 3. Optional: playwright deps (only for the token collector, when deps are missing)
+# 3. [Optional] Playwright deps (only for the token collector)
 npx playwright install-deps
 
-# 4. Generate the token database
+# 4. (Recommended) Copy the env template and fill in your values
+cp .env.example .env
+
+# 5. Generate the token database
 go run ./cmd/token-collector
 
-# 5. Start the server
+# 6. Start the server
 go run .
 ```
 
-For better performance build first: `go build -o zai-api -trimpath -gcflags="all=-l=4" -ldflags="-s -w" . && ./zai-api` (same pattern for `./cmd/token-collector`).
+> The repo ships **without** a `go.mod` by design (step 2 initializes one).
+> Copy **`.env.example` → your own environment** and set at least `AUTH_TOKEN`
+> and one `ZAI_TOKEN`. For multi-account rotation set `ZAI_TOKENS` to a
+> comma-separated list of several account JWTs — see below.
+
+For better performance build first: `go build -o glm -trimpath -gcflags="all=-l=4" -ldflags="-s -w" . && ./glm` (same pattern for `./cmd/token-collector`).
 
 On startup a banner shows the health URL, endpoints, and auth token. The Z.AI session initializes asynchronously — if guest init fails, the first chat request retries it.
+
+### Multi-account rotation (`ZAI_TOKENS`)
+
+Z.AI enforces a **concurrency limit per account, per model** — under burst load it answers with `Model is currently at capacity` (HTTP `503`) even when the account is healthy. The simplest mitigation is to run several Z.AI accounts and rotate requests across them.
+
+```bash
+# Comma-separated list of Z.AI account JWTs (one per account, any N >= 1)
+ZAI_TOKENS="<acct1-jwt>,<acct2-jwt>,<acct3-jwt>"
+```
+
+- Each outgoing request selects the next account **on a per-request basis** (pure round-robin, no sticky sessions).
+- If `ZAI_TOKENS` is set it is authoritative and overrides `ZAI_TOKEN`; the first entry also serves as the implicit guest-skip token.
+- Works with `ZAI_TOKENS` alone (you don't need both) and with any number of accounts.
+- There is no cost for listing more accounts than you have — each account added just smooths the load.
+- Combine with `UPSTREAM_MIN_INTERVAL_MS` pacing (below) to also throttle the overall request rate so the Aliyun WAF doesn't flag your egress IP.
+
+The per-request rotation appears in logs as:
+`[API] per-request account -> idx N/M (user)`.
 
 ---
 
@@ -123,6 +148,7 @@ On startup a banner shows the health URL, endpoints, and auth token. The Z.AI se
 | `AUTH_TOKEN` | `Waguri` | Bearer / `x-api-key` token for client auth |
 | `TIMEOUT` | `300000` | Request timeout (ms) |
 | `ZAI_TOKEN` | *(empty)* | Hardcoded Z.AI JWT — skips guest initialization |
+| `ZAI_TOKENS` | *(empty)* | Comma-separated list of Z.AI JWTs for multi-account per-request rotation (any `N >= 1`). Authoritative over `ZAI_TOKEN`; the first entry also skips guest init |
 | `AGENT_MODE` | `false` | Enable agent mode (`1`/`true`/`yes`/`on`/`modern` → modern shim, `legacy` → legacy shim) |
 | `AGENT_MODE_VARIANT` | `modern` | Shim variant override (`modern`/`legacy`; takes precedence over `AGENT_MODE`'s implicit variant) |
 | `LOG_LEVEL` | `debug` | `debug` dumps every Z.AI request/response, SSE lines, and headers |
@@ -339,7 +365,7 @@ To enable **all** server capabilities for a model (testing), add the header `Inc
 
 ## Agent Mode
 
-Z.AI's unofficial `/api/v2/chat/completions` only accepts `role="user"` messages — system/assistant/tool roles and OpenAI `tools`/`tool_calls` all cause `INTERNAL_ERROR`. With agent mode on (`--agent-mode` / `AGENT_MODE=true`), the bridge folds roles & tools into a user-only prompt and converts the model's `<<<TOOL_CALL>>>` output back into native `tool_calls` deltas (OpenAI) / `tool_use` blocks (Anthropic) with `finish_reason="tool_calls"` / `stop_reason="tool_use"`. **Agent mode is required for tool-calling to work** — without it, `tools` in the body are ignored. The hosted instance already runs it.
+Z.AI's unofficial `/api/v2/chat/completions` only accepts `role="user"` messages — system/assistant/tool roles and OpenAI `tools`/`tool_calls` all cause `INTERNAL_ERROR`. With agent mode on (`--agent-mode` / `AGENT_MODE=true`), the bridge folds roles & tools into a user-only prompt and converts the model's `<<<TOOL_CALL>>>` output back into native `tool_calls` deltas (OpenAI) / `tool_use` blocks (Anthropic) with `finish_reason="tool_calls"` / `stop_reason="tool_use"`. **Agent mode is required for tool-calling to work** — without it, `tools` in the body are ignored.
 
 **Modern shim (default, recommended)** — folds the whole conversation + tool contract into **one XML-sectioned user message**: `<system>` (output contract), `<tools>` (definitions), a filled-in example call built from the request's first tool, `<history_summary>` (older tool exchanges summarized — anti context-rot), `<recent>` (last 6 exchanges verbatim in `<tool_exchange>` groups), `<already_called>` (deduplicated list of calls already made — anti-loop, issue #31), `<current_task>`, `<output_rules>` (the contract repeated verbatim at the tail — recency). The `<system>` contract is deliberately strict and short (issue #44): the literal block is shown on its own lines in both the head and tail sections, the parser is described as a literal scanner whose only recognized spellings are those exact byte strings, and the derailment shapes observed in the wild (`TOOL_CALL_BLOCK`, renamed markers, fenced blocks) are explicitly named discarded — paraphrasing means the tool never runs. The parser itself keeps its own tolerance (markers matched with 2–4 angle brackets, ` ```json ` fences stripped, flat/alternate payloads normalized). The fallback parsers that used to chain behind it — Zhipu's native tag dialect, envelope-less bare invocations, and a stream-end re-extraction pass over the full text — were **removed**: the strict literal contract makes the model emit exactly the block above, so the default parser alone is sufficient and the fallbacks were pure complexity.
 
@@ -382,7 +408,7 @@ Both flags are also accepted on the Anthropic `/v1/messages` endpoint (`webSearc
 
 ## Examples
 
-> Self-hosted examples use `glm-4.7` so they work **without** `ZAI_TOKEN`. For the hosted instance use base URL `https://glm.cognix.sryze.cc/v1`, model `glm-5.2` or `glm-5.3-flash`, same auth.
+> Examples use `glm-4.7` so they work **without** `ZAI_TOKEN`. Replace `host`, `port` and `Waguri` with your own `HOST`/`PORT`/`AUTH_TOKEN`.
 
 ```bash
 # OpenAI — non-streaming
@@ -402,7 +428,7 @@ curl -N -X POST http://localhost:3001/v1/messages \
 ```
 
 ```python
-# Python — OpenAI SDK (self-hosted shown; hosted: base_url="https://glm.cognix.sryze.cc/v1", model="glm-5.3-flash" or "glm-5.2")
+# Python — OpenAI SDK (replace base_url / api_key with your own)
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:3001/v1", api_key="Waguri")
 resp = client.chat.completions.create(model="glm-4.7", messages=[{"role": "user", "content": "Hello!"}])
