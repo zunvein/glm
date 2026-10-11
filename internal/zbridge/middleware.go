@@ -47,7 +47,15 @@ func checkAuth(r *http.Request) bool {
     if provided == "" {
         provided = r.Header.Get("x-api-key")
     }
-    return provided == config.Auth.Token
+    if provided == config.Auth.Token {
+        return true
+    }
+    for _, k := range config.Auth.Extra {
+        if provided == k {
+            return true
+        }
+    }
+    return false
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {

@@ -38,6 +38,7 @@ type Config struct {
 	Auth struct {
 		Enabled bool
 		Token   string
+		Extra   []string
 	}
 	Timeouts struct {
 		Default int
@@ -104,8 +105,20 @@ func loadConfig() *Config {
 	if h := os.Getenv("HOST"); h != "" {
 		c.Server.Host = h
 	}
+	// AUTH_TOKEN: comma-separated; first key = primary, rest = extra client keys.
 	if t := os.Getenv("AUTH_TOKEN"); t != "" {
-		c.Auth.Token = t
+		var keys []string
+		for _, part := range strings.Split(t, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				keys = append(keys, part)
+			}
+		}
+		if len(keys) > 0 {
+			c.Auth.Token = keys[0]
+			if len(keys) > 1 {
+				c.Auth.Extra = keys[1:]
+			}
+		}
 	}
 	if t := os.Getenv("TIMEOUT"); t != "" {
 		if n, err := strconv.Atoi(t); err == nil {

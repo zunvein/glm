@@ -60,6 +60,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Agent-loop pacing: hold requests that continue a tool loop (a tool
+    // result just arrived) so the model is not re-fed instantly, step after
+    // step. Fresh turns pass through untouched. See agentloop.go.
+    paceAgentLoopStep(r.Context(), messages)
+
     // ── Vision: extract image_url parts, upload them to Z.AI, strip them ──
     // from the messages. cleanedMessages is byte-identical to body.Messages
     // when the request carries no images (the common case).
