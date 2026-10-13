@@ -182,7 +182,7 @@ func TestSSEDeepEditStaysValidUTF8(t *testing.T) {
 	// content at the old byte offset — inside a multi-byte rune.
 	longPrefix := strings.Repeat("长", 30)
 	body := sseEvent(fmt.Sprintf(`{"data":{"delta_content":"%s"}}`, longPrefix)) +
-		sseEvent(`{"data":{"edit_content":"短文abc` + longPrefix + `","edit_index":2}}`) +
+		sseEvent(`{"data":{"edit_content":"短文abc`+longPrefix+`","edit_index":2}}`) +
 		sseEvent(`{"data":{"phase":"done"}}`) +
 		"data: [DONE]\n\n"
 
@@ -201,9 +201,10 @@ func TestSSEDeepEditStaysValidUTF8(t *testing.T) {
 // "穿插着一些无法查看的乱码" pattern from the issue report.
 
 func TestSSEDetailsTagSplitAcrossEvents(t *testing.T) {
-	body := sseEvent(`{"data":{"delta_content":"答案"}}`) +
+	body := sseEvent(`{"data":{"delta_content":"答案\n"}}`) +
 		sseEvent(`{"data":{"delta_content":"<det"}}`) +
-		sseEvent(`{"data":{"delta_content":"ails>思考过程</details>"}}`) +
+		sseEvent(`{"data":{"delta_content":"ails>思考过程"}}`) +
+		sseEvent(`{"data":{"delta_content":"\n</details>"}}`) +
 		sseEvent(`{"data":{"delta_content":"正文内容"}}`) +
 		sseEvent(`{"data":{"phase":"done"}}`) +
 		"data: [DONE]\n\n"
@@ -217,7 +218,7 @@ func TestSSEDetailsTagSplitAcrossEvents(t *testing.T) {
 			if strings.Contains(clientText, "<det") || strings.Contains(clientText, "<details") {
 				t.Errorf("holdback=%d: <details> tag fragment leaked into client content: %q", hb, clientText)
 			}
-			want := "答案正文内容"
+			want := "答案\n正文内容"
 			if clientText != want {
 				t.Errorf("holdback=%d: client text = %q, want %q", hb, clientText, want)
 			}
@@ -377,20 +378,20 @@ func TestUTF16IndexToByteIndex(t *testing.T) {
 		idx  int
 		want int
 	}{
-		{"", 5, 0},                // empty string
-		{"abc", 0, 0},             // zero
-		{"abc", -3, 0},            // negative
-		{"abc", 2, 2},             // ASCII
-		{"abc", 99, 3},            // beyond end -> clamp
-		{"你好", 1, 3},            // BMP Chinese: 1 unit = 1 rune = 3 bytes
-		{"你好", 2, 6},            // end
-		{"A🙂B", 0, 0},            // before emoji
-		{"A🙂B", 1, 1},            // after 'A'
-		{"A🙂B", 2, 1},            // inside the surrogate pair -> clamp to rune start
-		{"A🙂B", 3, 5},            // after the emoji (1 + 4 bytes)
-		{"A🙂B", 4, 6},            // after 'B'
-		{"A🙂B", 100, 6},          // beyond end
-		{"你好🙂世界", 4, 10},     // 2+2 units then emoji: bytes 6+4=10
+		{"", 5, 0},       // empty string
+		{"abc", 0, 0},    // zero
+		{"abc", -3, 0},   // negative
+		{"abc", 2, 2},    // ASCII
+		{"abc", 99, 3},   // beyond end -> clamp
+		{"你好", 1, 3},     // BMP Chinese: 1 unit = 1 rune = 3 bytes
+		{"你好", 2, 6},     // end
+		{"A🙂B", 0, 0},    // before emoji
+		{"A🙂B", 1, 1},    // after 'A'
+		{"A🙂B", 2, 1},    // inside the surrogate pair -> clamp to rune start
+		{"A🙂B", 3, 5},    // after the emoji (1 + 4 bytes)
+		{"A🙂B", 4, 6},    // after 'B'
+		{"A🙂B", 100, 6},  // beyond end
+		{"你好🙂世界", 4, 10}, // 2+2 units then emoji: bytes 6+4=10
 	}
 	for _, c := range cases {
 		if got := utf16IndexToByteIndex(c.s, c.idx); got != c.want {
@@ -405,7 +406,10 @@ func TestUTF16IndexToByteIndex(t *testing.T) {
 }
 
 func TestCommonPrefixLenRuneSafe(t *testing.T) {
-	cases := []struct{ a, b string; want int }{
+	cases := []struct {
+		a, b string
+		want int
+	}{
 		{"", "", 0},
 		{"abc", "abd", 2},
 		{"你好世界", "你好地球", 6},
@@ -504,8 +508,10 @@ func TestHoldBackPartialDetailsTag(t *testing.T) {
 		{"abc<", "abc"},
 		{"abc<d", "abc"},
 		{"abc<det", "abc"},
-		{"abc<details", "abc"},               // complete opener literal held
+		{"abc<details", "abc"}, // complete opener literal held
 		{"abc</det", "abc"},
+		{"abc\n<det", "abc"},                 // newline before the pending tag held with it
+		{"abc\n</det", "abc"},                // same for the close tag
 		{"abc</details>", "abc</details>"},   // complete close tag stays (literal text)
 		{"abc<details>", "abc<details>"},     // splitDetails owns complete openers; not this layer
 		{"abc<div>", "abc<div>"},             // unrelated tag stays
@@ -520,8 +526,8 @@ func TestHoldBackPartialDetailsTag(t *testing.T) {
 
 func TestSplitDetails(t *testing.T) {
 	cases := []struct {
-		raw        string
-		wantReason string
+		raw         string
+		wantReason  string
 		wantContent string
 	}{
 		{"plain text", "", "plain text"},
