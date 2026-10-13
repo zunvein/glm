@@ -148,7 +148,11 @@ func TestReasoningCompleteBeforeContent(t *testing.T) {
 func TestReasoningReleasedWhenBlockCloses(t *testing.T) {
 	withHoldback(t, 24, func() {
 		quoted := "> " + strings.Repeat("reasoning text ", 20) // well past the hold-back window
-		full := "<details>" + quoted + "</details>" + strings.Repeat("answer text ", 50)
+		// Structural close = close tag on its own line. A same-line close right after a
+		// quoted thinking line is intentionally NOT structural (leak fix aed09f3;
+		// covered by TestSSEDetailsTagMentionedInThinkingBody), so this fixture models
+		// the real stream shape: newline before the close tag.
+		full := "<details>" + quoted + "\n" + "</details>" + strings.Repeat("answer text ", 50)
 		results := runSSEParser(t, editAppendStream(full))
 
 		// Find the index of the last reasoning delta and the first content
