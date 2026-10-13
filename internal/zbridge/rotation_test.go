@@ -20,32 +20,35 @@ func TestRotateTokenRoundRobin(t *testing.T) {
 	session.Initialized = true
 	session.mu.Unlock()
 
-	// First rotateToken picks the token at index%n (index 0 -> tok-A)
+	// rotateToken ADVANCES FIRST, then selects index%n (documented contract:
+	// "advances the active Z.AI account to the NEXT token"). Starting at index
+	// 0 (tok-A): rotate 1 -> idx 1 (tok-B), rotate 2 -> idx 2 (tok-A), rotate
+	// 3 -> idx 3 (tok-B). The cursor itself never wraps (monotonic). Asserts
+	// run AFTER unlocking: Fatalf inside the locked section Goexits and leaves
+	// the mutex poisoned for the next test (the old "deadlock" was this cascade).
 	rotateToken()
 	session.mu.Lock()
-	if session.Token != "tok-A" {
-		t.Fatalf("rotate 1: want tok-A, got %q", session.Token)
-	}
-	s1 := session.tokenIndex
+	tok1, s1 := session.Token, session.tokenIndex
 	session.mu.Unlock()
+	if tok1 != "tok-B" {
+		t.Fatalf("rotate 1: want tok-B (advance-first), got %q", tok1)
+	}
 
-	// Second rotateToken (index 1 -> tok-B)
 	rotateToken()
 	session.mu.Lock()
-	if session.Token != "tok-B" {
-		t.Fatalf("rotate 2: want tok-B, got %q", session.Token)
-	}
-	s2 := session.tokenIndex
+	tok2, s2 := session.Token, session.tokenIndex
 	session.mu.Unlock()
+	if tok2 != "tok-A" {
+		t.Fatalf("rotate 2: want tok-A (selection wraps to 2%%2=0), got %q", tok2)
+	}
 
-	// Third rotateToken wraps back to tok-A (index 2 -> 2%2=0 -> tok-A)
 	rotateToken()
 	session.mu.Lock()
-	if session.Token != "tok-A" {
-		t.Fatalf("rotate 3: want tok-A (wraparound), got %q", session.Token)
-	}
-	s3 := session.tokenIndex
+	tok3, s3 := session.Token, session.tokenIndex
 	session.mu.Unlock()
+	if tok3 != "tok-B" {
+		t.Fatalf("rotate 3: want tok-B, got %q", tok3)
+	}
 
 	// Indices should be strictly increasing (strict monotonic counter)
 	if !(s1 < s2 && s2 < s3) {
@@ -65,15 +68,21 @@ func TestRotateTokenSingleIsNoop(t *testing.T) {
 	session.mu.Unlock()
 
 	rotateToken()
+	// Single token: token must stay, initialized must stay true (no forced
+	// re-init), index must not advance. Snapshot under the lock, assert
+	// outside it (deadlock-proof pattern).
 	session.mu.Lock()
-	// Single token: token must stay, initialized must stay true (no forced re-init)
-	if session.Token != "only-tok" {
-		t.Fatalf("single rotate should not change token, got %q", session.Token)
+	tok, inited, idx := session.Token, session.Initialized, session.tokenIndex
+	session.mu.Unlock()
+	if tok != "only-tok" {
+		t.Fatalf("single rotate should not change token, got %q", tok)
 	}
-	if !session.Initialized {
+	if !inited {
 		t.Fatal("single token rotate should NOT force re-init")
 	}
-	session.mu.Unlock()
+	if idx != 0 {
+		t.Fatalf("single rotate should not advance the index, got %d", idx)
+	}
 }
 
 func TestIsRetriableZAIError(t *testing.T) {
