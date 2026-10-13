@@ -907,10 +907,17 @@ func holdBackPartialDetailsTag(s string) string {
 		return s
 	}
 	suffix := s[i:]
-	if len(suffix) <= len("<details") && strings.HasPrefix("<details", suffix) {
-		return s[:i]
-	}
-	if len(suffix) < len("</details>") && strings.HasPrefix("</details>", suffix) {
+	if (len(suffix) <= len("<details") && strings.HasPrefix("<details", suffix)) ||
+		(len(suffix) < len("</details>") && strings.HasPrefix("</details>", suffix)) {
+		// A newline DIRECTLY before the pending tag belongs to the
+		// tag's line: while the tag is incomplete it reads as body
+		// text, but once the tag completes it turns structural (or
+		// is trimmed). Emitting it would leave a residue the
+		// append-only emitter can never retract, so hold it with
+		// the tag.
+		if strings.HasSuffix(s[:i], "\n") {
+			return s[:i-1]
+		}
 		return s[:i]
 	}
 	return s
@@ -981,10 +988,43 @@ func (e *sseEmitter) delta(target string) string {
 	return delta
 }
 
+// indexStructuralClose returns the byte index of the first close tag in s
+// that does NOT sit on a ">"-quoted line, or -1. z.ai quotes every
+// thinking-body line with "> " and the structural close always sits on its
+// own line — but the thinking may MENTION the tags it plans to output
+// (drafting the preset's hidden summary block), and those mentions always
+// live on quoted lines. Matching the first bare occurrence closed the
+// reasoning block early and dumped the remaining quoted thinking into the
+// content channel — the 13 Oct CoT leak (traces 5f845a5c / 0b470aef).
+func indexStructuralClose(s string) int {
+	from := 0
+	for {
+		i := strings.Index(s[from:], "</details>")
+		if i < 0 {
+			return -1
+		}
+		i += from
+		lineStart := 0
+		if j := strings.LastIndexByte(s[:i], '\n'); j >= 0 {
+			lineStart = j + 1
+		}
+		if !strings.HasPrefix(s[lineStart:], ">") {
+			return i
+		}
+		from = i + 1
+	}
+}
+
 // splitDetails extracts every complete <details ...>...</details> block
 // from raw: the block bodies (concatenated) become reasoning, everything
 // else becomes content. A trailing opener whose '>' has not arrived yet is
 // held pending (neither reasoning nor content) until more data arrives.
+//
+// A close tag on a ">"-quoted line is a MENTION inside the reasoning body
+// (the model drafting the tags it plans to output), not a block boundary —
+// see indexStructuralClose. Matching the first bare occurrence closed the
+// reasoning early and dumped the remaining quoted thinking into the
+// content channel — the 13 Oct CoT leak (traces 5f845a5c / 0b470aef).
 //
 // open reports whether the tail of raw sits inside an UNFINISHED block (an
 // opener — complete or not — whose closing </details> has not arrived
@@ -1010,7 +1050,7 @@ func splitDetails(raw string) (reasoning, content string, open bool) {
 			return rb.String(), cb.String(), true // incomplete opener at the tail — hold pending
 		}
 		afterTag := rest[idx+tagEnd+1:]
-		closeIdx := strings.Index(afterTag, "</details>")
+		closeIdx := indexStructuralClose(afterTag)
 		if closeIdx < 0 {
 			rb.WriteString(afterTag) // reasoning still streaming
 			return rb.String(), cb.String(), true

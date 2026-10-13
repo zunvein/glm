@@ -97,7 +97,7 @@ func TestSSEReasoningQuotedLinesNoDuplication(t *testing.T) {
 	line1 := "First: OS release. `cat /etc/os-release` — but the instructions say use read tool for text files."
 	line2 := "That's for workspace files generally. But for system info gathering, bash is the natural approach."
 	inner := "> " + line1 + "\n> " + line2
-	full := "<details>" + inner + "</details>The answer."
+	full := "<details type=\"reasoning\" done=\"false\">\n" + inner + "\n</details>The answer."
 
 	for _, hb := range []int{0, 24} {
 		withHoldback(t, hb, func() {
@@ -128,7 +128,7 @@ func TestSSEReasoningQuotedLinesNoDuplication(t *testing.T) {
 // tail rewrite it causes must not duplicate anything after it.
 func TestSSEReasoningQuoteMarkerPartialArrival(t *testing.T) {
 	withHoldback(t, 0, func() {
-		full := "<details>> abc\n> def</details>ok"
+		full := "<details>\n> abc\n> def\n</details>ok"
 		results := runSSEParser(t, editAppendStream(full))
 		reasoning := collectReasoning(results)
 		want := "abc\ndef"
@@ -149,7 +149,7 @@ func TestSSEReasoningGrowthDeltasAreIncremental(t *testing.T) {
 	withHoldback(t, 0, func() {
 		line1 := "First: OS release. `cat /etc/os-release`."
 		want := line1 + "\nsecond line here"
-		full := "<details>> " + line1 + "\n> second line here</details>ans"
+		full := "<details>\n> " + line1 + "\n> second line here\n</details>ans"
 		results := runSSEParser(t, editAppendStream(full))
 
 		view := ""
@@ -178,17 +178,17 @@ func TestSSEReasoningTailBacktrackAbsorbed(t *testing.T) {
 		// backtracks inside the window and retypes the tail, then the
 		// block closes and the answer follows.
 		quoted := "> " + strings.Repeat("thinking text ", 12)
-		body, cur := editAppendEventsFrom("", "<details>"+quoted+"wrong tail")
+		body, cur := editAppendEventsFrom("", "<details>"+quoted+"wrong tail\n")
 		// Backtrack: replace "wrong tail" with "right end".
 		prefix := "<details>" + quoted
 		payload, _ := json.Marshal(map[string]interface{}{
 			"data": map[string]interface{}{
-				"edit_content": "right end",
+				"edit_content": "right end\n",
 				"edit_index":   utf16Len(prefix),
 			},
 		})
 		body += sseEvent(string(payload))
-		cur = prefix + "right end"
+		cur = prefix + "right end\n"
 		tail, _ := editAppendEventsFrom(cur, "</details>ans")
 		body += tail
 		body += sseEvent(`{"data":{"phase":"done"}}`)
