@@ -446,6 +446,12 @@ func sendToZAIStream(prompt string, opts struct {
 	RequestID         string
 	AdvancedSearch    bool
 }, ch chan<- ZAIResult) error {
+	// Pacing gate (WAF relief): every upstream chat path funnels through
+	// this function, so one gate here covers stream + non-stream callers.
+	// Cap rejection maps to HTTP 429 via statusFromError.
+	if err := acquirePace(); err != nil {
+		return err
+	}
 
 	// Issue #41/#46: retry budget. The existing loop is limited to 2 attempts
 	// (only retrying on HTTP 401 session re-init). For MODEL_CONCURRENCY_LIMIT
@@ -820,6 +826,9 @@ func extractZAIError(j map[string]interface{}) string {
 // statusFromError maps a Z.AI/bridge error string to an HTTP status code.
 func statusFromError(errMsg string) int {
 	switch {
+	case strings.Contains(errMsg, "hourly pacing cap exceeded"):
+		// Pacing damper (WAF relief): UPSTREAM_HOURLY_CAP reached -> 429.
+		return 429
 	case strings.Contains(errMsg, "temporarily blocked this server's IP"):
 		// Issue #41: IP-level WAF block — not the client's request shape.
 		// 503 (retry later), not 500.
