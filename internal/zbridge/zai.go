@@ -529,7 +529,11 @@ func sendToZAIStream(prompt string, opts struct {
 		// web-search toggle upstream (issue #42).
 		featuresPayload["web_search"] = false
 
+		// Z.AI requires a client-generated message id on every completion
+		// (upstream 400 MISSING_MESSAGE_ID otherwise, observed 2026-10-28).
+		// Same client-UUID pattern as chat_id — mint one per request.
 		requestBody := map[string]interface{}{
+			"id":                   randomUUID(),
 			"model":                opts.Model,
 			"chat_id":              opts.ChatID,
 			"messages":             messagesField,
