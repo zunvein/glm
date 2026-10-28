@@ -529,12 +529,19 @@ func sendToZAIStream(prompt string, opts struct {
 		// web-search toggle upstream (issue #42).
 		featuresPayload["web_search"] = false
 
+		// Z.AI killed the "glm-5.3-flash" id in the fe-1.1.122 deploy
+		// (2026-10-28); GLM-5.3-Flash is served as "x-preview-l" now.
+		// Alias the dead id so older clients keep working (500 otherwise).
+		upstreamModel := opts.Model
+		if upstreamModel == "glm-5.3-flash" {
+			upstreamModel = "x-preview-l"
+		}
 		// Z.AI requires a client-generated message id on every completion
 		// (upstream 400 MISSING_MESSAGE_ID otherwise, observed 2026-10-28).
 		// Same client-UUID pattern as chat_id — mint one per request.
 		requestBody := map[string]interface{}{
 			"id":                   randomUUID(),
-			"model":                opts.Model,
+			"model":                upstreamModel,
 			"chat_id":              opts.ChatID,
 			"messages":             messagesField,
 			"signature_prompt":     prompt,

@@ -7,8 +7,8 @@
 package zbridge
 
 import (
-    "database/sql"
-    "time"
+	"database/sql"
+	"time"
 )
 
 // GetConfig returns the live bridge configuration (env/flag parsed).
@@ -21,15 +21,15 @@ func GetConfig() *Config { return config }
 // state. Integration tests use it to skip guest auth against a mock
 // upstream.
 func OverrideSessionState(token, userID string, initialized bool) func() {
-    session.mu.Lock()
-    oldToken, oldUser, oldInit := session.Token, session.UserID, session.Initialized
-    session.Token, session.UserID, session.Initialized = token, userID, initialized
-    session.mu.Unlock()
-    return func() {
-        session.mu.Lock()
-        session.Token, session.UserID, session.Initialized = oldToken, oldUser, oldInit
-        session.mu.Unlock()
-    }
+	session.mu.Lock()
+	oldToken, oldUser, oldInit := session.Token, session.UserID, session.Initialized
+	session.Token, session.UserID, session.Initialized = token, userID, initialized
+	session.mu.Unlock()
+	return func() {
+		session.mu.Lock()
+		session.Token, session.UserID, session.Initialized = oldToken, oldUser, oldInit
+		session.mu.Unlock()
+	}
 }
 
 // SeedCaptchaParam pushes a ready-made captcha_verify_param into the
@@ -38,12 +38,12 @@ func OverrideSessionState(token, userID string, initialized bool) func() {
 // Only serves requests that run with agent mode on: the cache path in
 // getCaptchaVerifyParam is agent-mode only.
 func SeedCaptchaParam(value string) {
-    captchaCache.mu.Lock()
-    captchaCache.params = append(captchaCache.params, cachedCaptcha{
-        value:       value,
-        generatedAt: time.Now(),
-    })
-    captchaCache.mu.Unlock()
+	captchaCache.mu.Lock()
+	captchaCache.params = append(captchaCache.params, cachedCaptcha{
+		value:       value,
+		generatedAt: time.Now(),
+	})
+	captchaCache.mu.Unlock()
 }
 
 // OverrideCaptchaParam makes getCaptchaVerifyParam return the given value
@@ -52,31 +52,31 @@ func SeedCaptchaParam(value string) {
 // returned function restores the previous state. Integration tests use it
 // to drive the non-agent request path against a mock upstream.
 func OverrideCaptchaParam(value string) func() {
-    prev := captchaParamOverride
-    captchaParamOverride = value
-    return func() { captchaParamOverride = prev }
+	prev := captchaParamOverride
+	captchaParamOverride = value
+	return func() { captchaParamOverride = prev }
 }
 
 // FlushModelsCache clears the cached model list so the next /v1/models (or
 // capability lookup) re-fetches from the current BASE_URL. Tests use it to
 // repopulate the cache from their mock upstream after pointing BASE_URL at it.
 func FlushModelsCache() {
-    modelsCacheMu.Lock()
-    modelsCache = nil
-    modelsCacheTime = time.Time{}
-    modelsCacheMu.Unlock()
+	modelsCacheMu.Lock()
+	modelsCache = nil
+	modelsCacheTime = time.Time{}
+	modelsCacheMu.Unlock()
 }
 
 // ActiveDBPath returns the file path of the currently attached SQLite
 // database, or "" when none is attached. Tests use it to assert swap effects.
 func ActiveDBPath() string {
-    globalDBState.mu.RLock()
-    h := globalDBState.active
-    globalDBState.mu.RUnlock()
-    if h.db == nil {
-        return ""
-    }
-    return h.path
+	globalDBState.mu.RLock()
+	h := globalDBState.active
+	globalDBState.mu.RUnlock()
+	if h.db == nil {
+		return ""
+	}
+	return h.path
 }
 
 // AttachDatabase installs an already-open database (opened by the caller,
@@ -95,3 +95,14 @@ func SwapDatabase(newPath string) error { return swapDB(newPath) }
 // TokenCount exposes the TTL-cached token count (the /health value) for
 // tests and operational scripting. -1 means "unavailable".
 func TokenCount() int64 { return globalDBState.tokenCount() }
+
+// OverrideSessionReuseCount swaps the global SESSION_REUSE_COUNT and returns
+// a restore func. Tests use it to pin throwaway (1) or reuse (N) behaviour.
+func OverrideSessionReuseCount(n int) func() {
+	prev := config.SessionReuseCount
+	config.SessionReuseCount = n
+	return func() { config.SessionReuseCount = prev }
+}
+
+// ResetSyncStickySession clears the sync-mode sticky session (tests).
+func ResetSyncStickySession() { ResetSyncSticky() }
