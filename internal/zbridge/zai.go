@@ -570,17 +570,11 @@ func sendToZAIStream(prompt string, opts struct {
 		bodyBytes, _ := json.Marshal(requestBody)
 
 		if config.Logging.Level == "debug" {
-			log.Println("[DEBUG] Z.AI url", urlStr)
-			log.Println("[DEBUG] Z.AI request body:", string(bodyBytes))
-			hdrMap := map[string]string{
-				"authorization": "Bearer " + token,
-				"content-type":  "application/json",
-				"x-fe-Version":  feVersion,
-				"x-region":      "overseas",
-				"x-signature":   signature,
-			}
-			hdrJSON, _ := json.MarshalIndent(hdrMap, "", "  ")
-			log.Println("[DEBUG] Z.AI request headers", string(hdrJSON))
+			// PRIVACY (29 Okt, owner directive): never log raw chat payloads or
+			// credentials. Values are reduced to sizes; bodies stay on the wire.
+			log.Println("[DEBUG] Z.AI url", maskURLToken(urlStr))
+			log.Printf("[DEBUG] Z.AI request body: %d bytes", len(bodyBytes))
+			log.Printf("[DEBUG] Z.AI request headers: authorization=<redacted> content-type=application/json x-fe-Version=%s x-region=overseas x-signature=<redacted>", feVersion)
 		}
 
 		timeout := time.Duration(config.Timeouts.Default) * time.Millisecond * 2
@@ -1082,6 +1076,18 @@ func splitDetails(raw string) (reasoning, content string, open bool) {
 
 // streamSSEResponse parses Z.AI's upstream SSE stream into ZAIResult chunks.
 // requestId, when non-empty, prefixes every debug log line emitted here so
+// maskURLToken redacts the token query parameter (device JWT) from a
+// URL before it reaches debug logs (privacy: credentials never logged).
+func maskURLToken(u string) string {
+	if i := strings.Index(u, "token="); i >= 0 {
+		if j := strings.Index(u[i:], "&"); j >= 0 {
+			return u[:i] + "token=<redacted>" + u[i+j:]
+		}
+		return u[:i] + "token=<redacted>"
+	}
+	return u
+}
+
 // concurrent streams can be attributed (issue #36).
 func streamSSEResponse(body io.Reader, ch chan<- ZAIResult, requestId string) error {
 	scanner := bufio.NewScanner(body)
@@ -1178,7 +1184,13 @@ func streamSSEResponse(body io.Reader, ch chan<- ZAIResult, requestId string) er
 		trimmed := strings.TrimSpace(line)
 
 		if config.Logging.Level == "debug" && trimmed != "" {
-			log.Println(logPrefix, "Z.AI SSE line:", trimmed)
+			// PRIVACY (29 Okt, owner directive): SSE payloads carry the user chat
+			// text (delta_content/edit_content) - log metadata only.
+			if strings.Contains(trimmed, "delta_content") || strings.Contains(trimmed, "edit_content") {
+				log.Printf("%s Z.AI SSE line: <content elided, %d bytes>", logPrefix, len(trimmed))
+			} else {
+				log.Println(logPrefix, "Z.AI SSE line:", trimmed)
+			}
 		}
 
 		if !strings.HasPrefix(trimmed, "data: ") {
