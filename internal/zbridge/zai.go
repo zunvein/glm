@@ -189,7 +189,7 @@ func initializeSession() error {
 		if len(uidPreview) > 8 {
 			uidPreview = uidPreview[:8]
 		}
-		log.Printf("[Session] Token user: %s... (%s)", uidPreview, session.UserName)
+		log.Printf("[Session] Token user: %s... (%s)", uidPreview, maskAccount(session.UserName))
 		session.Initialized = true
 		return nil
 	}
@@ -600,12 +600,11 @@ func sendToZAIStream(prompt string, opts struct {
 
 		if config.Logging.Level == "debug" {
 			log.Printf("[DEBUG] Z.AI response status: %d %s", resp.StatusCode, resp.Status)
-			hdrs := map[string]string{}
-			for k, v := range resp.Header {
-				hdrs[k] = strings.Join(v, ", ")
+			hdrKeys := make([]string, 0, len(resp.Header))
+			for k := range resp.Header {
+				hdrKeys = append(hdrKeys, k)
 			}
-			hdrJSON, _ := json.MarshalIndent(hdrs, "", "  ")
-			log.Println("[DEBUG] Z.AI response headers:", string(hdrJSON))
+			log.Printf("[DEBUG] Z.AI response headers: [%s] (values not logged)", strings.Join(hdrKeys, ", "))
 		}
 
 		if resp.StatusCode == 401 {
@@ -625,7 +624,11 @@ func sendToZAIStream(prompt string, opts struct {
 			resp.Body.Close()
 			cancel()
 			if config.Logging.Level == "debug" {
-				log.Println("[DEBUG] Z.AI error body:", string(errBody))
+				eb := truncateErrorBody(errBody)
+				if len(eb) > 200 {
+					eb = eb[:200] + "..."
+				}
+				log.Println("[DEBUG] Z.AI error body:", eb)
 			}
 			// Issue #41: the Aliyun WAF block page comes back as 405 with
 			// the block HTML. Detect it, trip the breaker, and surface a
@@ -1076,6 +1079,15 @@ func splitDetails(raw string) (reasoning, content string, open bool) {
 
 // streamSSEResponse parses Z.AI's upstream SSE stream into ZAIResult chunks.
 // requestId, when non-empty, prefixes every debug log line emitted here so
+// maskAccount masks the local part of an account email in logs
+// (privacy 29 Okt: identity may appear, but not in full).
+func maskAccount(u string) string {
+	if i := strings.Index(u, "@"); i > 1 {
+		return u[:1] + "***" + u[i:]
+	}
+	return u
+}
+
 // maskURLToken redacts the token query parameter (device JWT) from a
 // URL before it reaches debug logs (privacy: credentials never logged).
 func maskURLToken(u string) string {
