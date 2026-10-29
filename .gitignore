@@ -20,3 +20,14 @@ go.sum
 
 # Local generated auth token (never commit)
 .new_authtoken
+
+# local build artifacts & runtime data (never track)
+zai-api-dev
+zai-api-dev.bak-*
+zai-api-dev.redact-*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+pool/*.sqlite*
+pool/.wd-last
+.swapenv
