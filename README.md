@@ -8,11 +8,23 @@ An OpenAI- **and Anthropic-compatible** API proxy for [chat.z.ai](https://chat.z
 
 This project is a **fork** of [**GLM-Free-API**](https://github.com/izaart95-jpg/GLM-Free-API) by [**izaart95-jpg**](https://github.com/izaart95-jpg) (Lelouch). The vast majority of the code — the OpenAI/Anthropic proxy core, vision support, token collector, Aliyun captcha machinery, agent mode, session pool, and all research assets — comes **directly from the original project**, and all credit for it goes to the original author.
 
-This fork only makes a **small set of additive tweaks** on top:
+This fork makes a **focused set of additive tweaks and fixes** on top, kept as small reviewable commits:
 
+### Taken back from upstream (izaart95-jpg's later work)
+- **Session-reuse (`SESSION_REUSE_COUNT`)** — one chat session serves up to 10 requests before it is deleted on Z.AI and replaced (far fewer captcha computes, much slower token burn). The session pool pre-warms 5 sessions.
+- **FeiLin token collector** — one headful browser visit harvests a trusted device session, then mints 120 device tokens programmatically per run (headless-minted tokens are rejected by the Aliyun risk layer).
+
+### Fixed locally (upstream tree currently lacks these)
+- **Client-generated message `id`** on every `/api/v2/chat/completions` — Z.AI returns 400 `MISSING_MESSAGE_ID` without it (their tree, last touched 22 Oct, is broken against live Z.AI).
+- **Dead model alias** — `glm-5.3-flash` (removed upstream-side by Z.AI's `prod-fe-1.1.122` deploy) is aliased to the live `x-preview-l` id.
+- **`fe-version` pinned** to the frontend build Z.AI currently expects.
+- **Privacy-safe debug logs** — with `LOG_LEVEL=debug`: request bodies are logged as byte counts only, `authorization`/`x-signature` headers and the device-JWT `token=` query param are `<redacted>`, and streamed `delta_content`/`edit_content` SSE lines become `<content elided, N bytes>`. Chat text and credentials never reach logs (canary-tested).
+
+### Operational tooling shipped in this repo (`pool/`)
+- **`pool/refill.sh`** — systemd refill (every 30 min): mint 120 tokens headfully, stage atomically, then **hot-swap into the running bridge** via `POST /sqlite` with a **unique filename per generation** — a same-path swap of a WAL-mode DB replays the previous generation's `-wal` over the fresh batch, so the bridge would silently keep consuming the old, burning pool while fresh batches sit invisible on disk.
+- **`pool/token-watchdog.sh`** — systemd watchdog (every 2 min): if the live pool drops below a floor (Aliyun "verify storms" can burn ~120 tokens in ~10 min through the prewarm retry loop), it mints a fresh batch under a new device identity and hot-swaps it in; no-op when the pool is healthy.
 - **Multi-account rotation** — a `ZAI_TOKENS` env var that round-robins requests across several Z.AI accounts per-call (spreads per-account/per-model concurrency limits). See [Multi-account rotation](#multi-account-rotation-zai_tokens).
-- **Upstream pacing** — an optional shared gate (`UPSTREAM_MIN_INTERVAL_MS`) that enforces a minimum gap between requests to Z.AI / Aliyun so bursts don't trip the WAF.
-- A couple of small fixes/observability tweaks for the rotation path.
+- **Upstream pacing** — an optional shared gate (`UPSTREAM_MIN_INTERVAL_MS` / `UPSTREAM_MIN_GAP_MS` + rolling-hour cap) that enforces a minimum gap between requests to Z.AI / Aliyun so bursts don't trip the WAF.
 
 Everything else is the original author's work. **Respect the upstream license and the original author's effort.** If you use or redistribute this fork, keep the credit to `izaart95-jpg` and the link above.
 
