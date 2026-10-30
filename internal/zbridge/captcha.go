@@ -442,10 +442,15 @@ func recordCaptchaFailure() {
     captchaBreakerMu.Lock()
     defer captchaBreakerMu.Unlock()
     captchaComputeFailures++
-    if captchaComputeFailures >= captchaBreakerThreshold && captchaBreakerOpenAt.IsZero() {
+    // Re-arm on every storm burst: openAt stays in the past after a cooldown
+    // expires, so "IsZero only" would let the breaker fire exactly once and
+    // leave the following cycle unbounded (observed live 30 Okt: pool
+    // 120 -> 18 in 4 min during one storm).
+    if captchaComputeFailures >= captchaBreakerThreshold && !time.Now().Before(captchaBreakerOpenAt) {
         captchaBreakerOpenAt = time.Now().Add(captchaBreakerCooldown)
+        captchaComputeFailures = 0
         log.Printf("[Captcha] circuit breaker OPEN for %s after %d failed computes (token burn capped)",
-            captchaBreakerCooldown, captchaComputeFailures)
+            captchaBreakerCooldown, captchaBreakerThreshold)
     }
 }
 

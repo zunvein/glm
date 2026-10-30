@@ -31,3 +31,7 @@ zai-api-dev.redact-*
 pool/*.sqlite*
 pool/.wd-last
 .swapenv
+
+# source backup files must never be tracked
+internal/zbridge/*.bak-*
+*.bak-2*
