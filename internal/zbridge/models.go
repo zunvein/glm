@@ -201,9 +201,33 @@ func architectureFor(caps map[string]interface{}) map[string]interface{} {
     }
 }
 
+// passthroughModelSupplement: model ids that still complete through the chat
+// pipeline but are NOT in upstream /api/models anymore. Z.AI trims its public
+// catalog without notice (glm-5.1/glm-5 dropped 2026-10-30 — chat calls to a
+// missing id return 500), while older ids like glm-4.7 still work via the
+// normal passthrough. Advertised ids always win; these are appended only when
+// upstream does not list them, so nothing is masked or overridden.
+var passthroughModelSupplement = []ModelInfo{
+    {ID: "glm-4.7", Name: "GLM-4.7", Description: "Legacy chat tier; no longer listed upstream but still completes via passthrough."},
+    {ID: "glm-4.6v", Name: "GLM-4.6V", Description: "Vision model; no longer listed upstream, streaming still works (slow, thinking-heavy).", Capabilities: map[string]interface{}{"vision": true}},
+}
+
+func supplementModels(models []ModelInfo) []ModelInfo {
+    seen := make(map[string]bool, len(models))
+    for _, m := range models {
+        seen[m.ID] = true
+    }
+    for _, m := range passthroughModelSupplement {
+        if !seen[m.ID] {
+            models = append(models, m)
+        }
+    }
+    return models
+}
+
 func modelsHandler(w http.ResponseWriter, r *http.Request) {
     now := time.Now().Unix()
-    models := fetchModelsFromZAI()
+    models := supplementModels(fetchModelsFromZAI())
     data := make([]map[string]interface{}, 0, len(models))
     for _, m := range models {
         created := m.Created
@@ -228,7 +252,7 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func modelsHandler2(w http.ResponseWriter, r *http.Request) {
-    models := fetchModelsFromZAI()
+    models := supplementModels(fetchModelsFromZAI())
     ids := make([]string, 0, len(models))
     for _, m := range models {
         ids = append(ids, m.ID)
