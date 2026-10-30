@@ -80,6 +80,10 @@ func Run() {
 
     gRunning.Store(true)
 
+    // Frontend-version auto-refresh: re-scrape prod-fe-* every 10 min so a
+    // Z.AI frontend deploy is picked up without a manual restart.
+    go feVersionRefresher()
+
     if config.AgentMode {
         go captchaCache.Run()
         logInfo("Agent mode: Captcha background cache started")

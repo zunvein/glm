@@ -134,6 +134,19 @@ func scrapeConfig() {
 	}
 }
 
+// feVersionRefresher re-scrapes the live frontend version periodically so a
+// Z.AI frontend deploy (28 Okt: default 1.1.93 died the moment 1.1.122 went
+// out; 31 Okt: frontend already at 1.1.123 while our pin was stale) is picked
+// up automatically instead of staying stale in memory until a manual restart.
+// scrapeConfig() itself keeps the pinned default when the scrape fails.
+func feVersionRefresher() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		scrapeConfig()
+	}
+}
+
 func initializeSession() error {
 	session.mu.Lock()
 	if session.Initializing {
