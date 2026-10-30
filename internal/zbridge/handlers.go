@@ -701,6 +701,10 @@ func sqliteSwapHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Fresh batch just arrived - a storm-opened breaker must not delay
+    // recovery when the pool is healthy again.
+    resetCaptchaBreaker()
+
     writeJSON(w, http.StatusOK, map[string]interface{}{
         "success":     true,
         "message":     "database swapped",

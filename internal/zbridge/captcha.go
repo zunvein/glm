@@ -415,12 +415,68 @@ func verifyCaptcha(certifyID, dataValue, deviceToken string) (string, error) {
 // COMPUTE FINAL PAYLOAD — tries tokens until success or exhausted
 // ============================================================================
 
+// CAPTCHA CIRCUIT BREAKER — during an upstream verify-storm every compute
+// burns up to maxTokenRetries tokens and the background cache loop keeps
+// re-spawning generates without pause, so a fresh 120-token pool evaporates
+// in ~2-3 minutes (30 Okt incident #6). After a few consecutive failed
+// computes the breaker opens: computeFinalPayload returns "" immediately
+// WITHOUT consuming tokens until the cooldown elapses. A fresh pool swap
+// (POST /sqlite from refill/watchdog) resets it so recovery is immediate.
+
+const captchaBreakerThreshold = 3
+const captchaBreakerCooldown = 90 * time.Second
+
+var (
+    captchaBreakerMu       sync.Mutex
+    captchaComputeFailures int
+    captchaBreakerOpenAt   time.Time // zero = closed
+)
+
+func captchaBreakerOpen() bool {
+    captchaBreakerMu.Lock()
+    defer captchaBreakerMu.Unlock()
+    return time.Now().Before(captchaBreakerOpenAt)
+}
+
+func recordCaptchaFailure() {
+    captchaBreakerMu.Lock()
+    defer captchaBreakerMu.Unlock()
+    captchaComputeFailures++
+    if captchaComputeFailures >= captchaBreakerThreshold && captchaBreakerOpenAt.IsZero() {
+        captchaBreakerOpenAt = time.Now().Add(captchaBreakerCooldown)
+        log.Printf("[Captcha] circuit breaker OPEN for %s after %d failed computes (token burn capped)",
+            captchaBreakerCooldown, captchaComputeFailures)
+    }
+}
+
+func recordCaptchaSuccess() {
+    captchaBreakerMu.Lock()
+    defer captchaBreakerMu.Unlock()
+    if !captchaBreakerOpenAt.IsZero() {
+        log.Printf("[Captcha] circuit breaker CLOSED - captcha compute succeeded")
+    }
+    captchaComputeFailures = 0
+    captchaBreakerOpenAt = time.Time{}
+}
+
+func resetCaptchaBreaker() {
+    captchaBreakerMu.Lock()
+    defer captchaBreakerMu.Unlock()
+    captchaComputeFailures = 0
+    captchaBreakerOpenAt = time.Time{}
+}
+
 func computeFinalPayload() string {
+    if captchaBreakerOpen() {
+        log.Printf("[Captcha] circuit breaker open - fail fast without consuming tokens")
+        return ""
+    }
     for attempt := 0; attempt < maxTokenRetries; attempt++ {
         deviceToken, ok := getNextToken()
         if !ok {
             logError(fmt.Sprintf("No device tokens remaining (attempt %d/%d)",
                 attempt+1, maxTokenRetries))
+            recordCaptchaFailure()
             return ""
         }
         logInfo(fmt.Sprintf("Attempt %d/%d using deviceToken=%s",
@@ -433,11 +489,13 @@ func computeFinalPayload() string {
             continue
         }
         if payload != "" {
+            recordCaptchaSuccess()
             return payload
         }
         logError("deviceToken=" + deviceToken + " produced empty payload, retrying")
     }
     logError(fmt.Sprintf("All %d token retries exhausted", maxTokenRetries))
+    recordCaptchaFailure()
     return ""
 }
 
