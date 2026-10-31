@@ -20,8 +20,8 @@ TS=$(date -u +%FT%TZ)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 LIVE=$POOL/tokens-live-$STAMP.sqlite
 
-# 1) mint fresh device tokens (headful browser via DISPLAY=:1 from the unit)
-/home/ec2-user/zai-api-dev/token-collector --no-tui --tokens 120 >> "$LOG" 2>&1
+# 1) mint fresh device tokens (batch 240, tuned 31 Okt) (headful browser via DISPLAY=:1 from the unit)
+/home/ec2-user/zai-api-dev/token-collector --no-tui --tokens 240 >> "$LOG" 2>&1
 if [ $? -ne 0 ]; then
     echo "$TS MINT FAILED" >> "$LOG"
     exit 1
@@ -60,7 +60,7 @@ fi
 # 4) GC: keep only the 3 newest generations (+ their wal/shm sidecars).
 #    The bridge's active db is always among the 3 newest, and manual restarts
 #    resolve the symlink to the newest, so GC can never strand either.
-ls -1t "$POOL"/tokens-live-*.sqlite 2>/dev/null | tail -n +4 | while IFS= read -r f; do
+ls -1t "$POOL"/tokens-live-*.sqlite 2>/dev/null | tail -n +5 | while IFS= read -r f; do
     rm -f "$f" "$f-wal" "$f-shm"
 done
 exit 0

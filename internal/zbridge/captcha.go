@@ -6,7 +6,9 @@ package zbridge
 import (
     "io"
     "os"
+    "os/exec"
     "sort"
+    "strings"
     "bytes"
     "compress/zlib"
     "database/sql"
@@ -15,7 +17,6 @@ import (
     "fmt"
     "log"
     "net/http"
-    "strings"
     "sync"
     "time"
 )
@@ -438,19 +439,71 @@ func captchaBreakerOpen() bool {
     return time.Now().Before(captchaBreakerOpenAt)
 }
 
+var (
+    // stormRefillMu serialises auto-reharvest so a storm never triggers two
+    // overlapping refill.sh browser visits. refill.sh hot-swaps a fresh pool
+    // via POST /sqlite, which resets the breaker (swapDB -> resetCaptchaBreaker),
+    // so one refill during a storm is enough to unblock the next compute.
+    stormRefillMu       sync.Mutex
+    stormRefillLast     time.Time // last time we auto-reharvested, to rate-limit
+    stormRefillMinGap   = 90 * time.Second
+    stormRefillScript   = "pool/refill.sh"
+)
+
+// spawnStormRefill fires refill.sh in a background goroutine so the request
+// path is never blocked by the (browser-visit) harvest. Single-flight: if a
+// refill already ran within stormRefillMinGap, this is a no-op. The freshly
+// minted pool is swapped in by refill.sh itself, and the swap resets the
+// breaker, so the next compute gets fresh device identities that Aliyun has
+// not yet flagged.
+func spawnStormRefill() {
+    stormRefillMu.Lock()
+    if time.Since(stormRefillLast) < stormRefillMinGap {
+        stormRefillMu.Unlock()
+        return
+    }
+    stormRefillLast = time.Now()
+    stormRefillMu.Unlock()
+
+    log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh)")
+    go func() {
+        cmd := exec.Command("/bin/sh", stormRefillScript)
+        cmd.Dir = "/home/ec2-user/zai-api-dev"
+        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user")
+        out, err := cmd.CombinedOutput()
+        if err != nil {
+            logError(fmt.Sprintf("[Captcha] storm auto-refill FAILED: %v out=%s", err, string(out)))
+            return
+        }
+        log.Printf("[Captcha] storm auto-refill completed: %s", strings.TrimSpace(string(out)))
+    }()
+}
+
 func recordCaptchaFailure() {
     captchaBreakerMu.Lock()
-    defer captchaBreakerMu.Unlock()
     captchaComputeFailures++
     // Re-arm on every storm burst: openAt stays in the past after a cooldown
     // expires, so "IsZero only" would let the breaker fire exactly once and
     // leave the following cycle unbounded (observed live 30 Okt: pool
     // 120 -> 18 in 4 min during one storm).
+    tripped := false
     if captchaComputeFailures >= captchaBreakerThreshold && !time.Now().Before(captchaBreakerOpenAt) {
         captchaBreakerOpenAt = time.Now().Add(captchaBreakerCooldown)
         captchaComputeFailures = 0
+        tripped = true
         log.Printf("[Captcha] circuit breaker OPEN for %s after %d failed computes (token burn capped)",
             captchaBreakerCooldown, captchaBreakerThreshold)
+    }
+    captchaBreakerMu.Unlock()
+
+    // The breaker tripped => a verify-storm is live and the current pool's
+    // device identities are all being flagged by Aliyun. The fastest native
+    // recovery (no headful browser daemon, no RAM cost) is to harvest a fresh
+    // batch and hot-swap: fresh identities are accepted until Aliyun re-flags
+    // them ~10-30 min later. Trigger it exactly once per trip (single-flight
+    // + rate-limited above).
+    if tripped {
+        spawnStormRefill()
     }
 }
 
@@ -662,12 +715,69 @@ func (c *CaptchaCache) generate() {
 // instead of hitting the real Aliyun machinery. It is a test seam in the
 // same spirit as wafProbeTransport (waf.go): whitebox tests set it to
 // drive sendToZAI against a mock upstream without agent mode (the cache
-// path is agent-mode only). Production never sets it.
-var captchaParamOverride string
+// path is agent-mode only).
+//
+// As of 31 Okt it is ALSO a production path: the headful captcha daemon
+// (tools-28okt/zcapd) captures a REAL AliyunSDK captcha_verify_param from a
+// live browser during verify-storms (when the programmatic VerifyCaptchaV3
+// call is rejected as "empty payload") and POSTs it here via /captcha. The
+// param is validated (must be non-empty base64) and has a TTL so a stale
+// browser-bound param never lingers. Thread-safe via a mutex (the compute
+// path and the HTTP handler may race).
+var (
+    captchaParamOverrideMu sync.Mutex
+    captchaParamOverride   string
+    captchaParamOverrideAt time.Time
+)
+
+// captchaOverrideTTL bounds how long a daemon-injected param is trusted.
+// The param is single-use at Z.AI (each captcha_verify_param is consumed on
+// the first completion), so a fresh one must be fed continuously; a stale
+// one from a crashed daemon must expire instead of serving every request
+// with a dead param.
+const captchaOverrideTTL = 60 * time.Second
+
+// setCaptchaParamOverride stores a daemon-supplied headful captcha param and
+// re-arms the breaker (a fresh param means the storm may have cleared — let
+// compute try again immediately instead of waiting out the cooldown).
+func setCaptchaParamOverride(val string) bool {
+    if val == "" {
+        return false
+    }
+    captchaParamOverrideMu.Lock()
+    defer captchaParamOverrideMu.Unlock()
+    captchaParamOverride = val
+    captchaParamOverrideAt = time.Now()
+    resetCaptchaBreaker()
+    return true
+}
+
+// clearCaptchaParamOverride drops an injected param (used on /sqlite swap so
+// a new pool batch starts clean).
+func clearCaptchaParamOverride() {
+    captchaParamOverrideMu.Lock()
+    defer captchaParamOverrideMu.Unlock()
+    captchaParamOverride = ""
+    captchaParamOverrideAt = time.Time{}
+}
 
 func getCaptchaVerifyParam() (string, error) {
-    if captchaParamOverride != "" {
-        return captchaParamOverride, nil
+    captchaParamOverrideMu.Lock()
+    override := captchaParamOverride
+    // A zero timestamp means the override was set directly (the whitebox /
+    // blackbox test seam and older direct-assignment callers), which is
+    // always fresh. A non-zero timestamp is a daemon-injected headful param
+    // with a TTL. Stale daemon params are dropped and fall through to compute.
+    fresh := captchaParamOverrideAt.IsZero() || time.Since(captchaParamOverrideAt) < captchaOverrideTTL
+    if override != "" && !fresh {
+        // Stale daemon param — drop it and fall through to compute.
+        override = ""
+        captchaParamOverride = ""
+    }
+    captchaParamOverrideMu.Unlock()
+    if override != "" {
+        log.Printf("[Captcha] using daemon-injected headful param (TTL active)")
+        return override, nil
     }
     if config.AgentMode {
         if val, ok := captchaCache.Get(); ok {

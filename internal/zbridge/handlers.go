@@ -704,6 +704,7 @@ func sqliteSwapHandler(w http.ResponseWriter, r *http.Request) {
     // Fresh batch just arrived - a storm-opened breaker must not delay
     // recovery when the pool is healthy again.
     resetCaptchaBreaker()
+    clearCaptchaParamOverride()
 
     writeJSON(w, http.StatusOK, map[string]interface{}{
         "success":     true,
@@ -742,3 +743,52 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
     })
 }
 
+
+// captchaHandler receives a fresh headful captcha_verify_param from the
+// headful captcha daemon (tools-28okt/zcapd) and feeds it to the bridge via
+// captchaParamOverride, bypassing the programmatic Aliyun verify when it is
+// being rejected during a verify-storm. Auth-protected like other mutating
+// endpoints.
+//
+//	POST /captcha  {"param":"<base64 captcha_verify_param>"}
+func captchaHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{
+			"success": false,
+			"error":   "method not allowed — use POST /captcha with {\"param\":\"...\"}",
+		})
+		return
+	}
+
+	var body struct {
+		Param string `json:"param"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid JSON: " + err.Error(),
+		})
+		return
+	}
+	if body.Param == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "param is required",
+		})
+		return
+	}
+	if !setCaptchaParamOverride(body.Param) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "param rejected (empty)",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":  true,
+		"message":  "captcha param set (breaker re-armed)",
+		"ttl_sec":  int(captchaOverrideTTL / time.Second),
+		"accepted": len(body.Param),
+	})
+}

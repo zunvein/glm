@@ -8,7 +8,7 @@
 # No-op total kalau pool sehat. Cooldown mencegah mint beruntun.
 set -u
 POOL=/home/ec2-user/zai-api-dev/pool
-MIN=30        # floor tokenCount
+MIN=60        # floor tokenCount (tuned 31 Okt: refill earlier for bigger safety margin)
 COOLDOWN=300  # detik minimum antara refill yang di-trigger watchdog
 
 NOW=$(date +%s)

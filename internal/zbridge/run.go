@@ -50,6 +50,7 @@ func NewHandler() http.Handler {
     // Hot-swap the active tokens.sqlite without restarting the server.
     // Auth-protected like every other mutating endpoint.
     mux.HandleFunc("/sqlite", authMiddleware(sqliteSwapHandler))
+    mux.HandleFunc("/captcha", authMiddleware(captchaHandler))
 
     return corsMiddleware(mux)
 }
