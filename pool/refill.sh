@@ -13,6 +13,16 @@
 # path. All outcomes logged to swap.log.
 set -u
 POOL=/home/ec2-user/zai-api-dev/pool
+# Concurrency guard (1 Nov): timer + watchdog + storm hook can all fire
+# refill.sh near-simultaneously; two concurrent mints raced on the shared
+# $POOL/tokens.sqlite intermediate (one run logged "STAGE FAILED", 1 Nov).
+# One browser-visit harvest at a time — a second caller exits cleanly
+# because the in-flight refill produces the exact same fresh pool.
+exec 9>"$POOL/.refill.lock"
+if ! flock -n 9; then
+    echo "$(date -u +%FT%TZ) REFILL BUSY - another refill in flight, standing down" >> "$POOL/swap.log"
+    exit 0
+fi
 REPO_LINK=/home/ec2-user/zai-api-dev/tokens.sqlite
 cd "$POOL" || exit 1
 LOG=$POOL/swap.log

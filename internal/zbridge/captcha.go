@@ -513,13 +513,20 @@ func spawnStormRefill() {
     stormRefillLast = now
     stormRefillCount++
     stormRefillLastAt = now
+    // Capture the config BEFORE the goroutine: the goroutine body reads
+    // package vars, and in tests those are restored (defer) while the
+    // goroutine is still pending — a live 1 Nov incident saw orphaned
+    // refills exec the REAL pool/refill.sh after a budget test restored
+    // the seam. Locals close the race (also keeps `go test -race` clean).
+    script := stormRefillScript
+    sessions := stormRefillSessions
     stormRefillMu.Unlock()
 
-    log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh, %s sessions)", stormRefillSessions)
+    log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh, %s sessions)", sessions)
     go func() {
-        cmd := exec.Command("/bin/sh", stormRefillScript)
+        cmd := exec.Command("/bin/sh", script)
         cmd.Dir = "/home/ec2-user/zai-api-dev"
-        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user", "REFILL_SESSIONS="+stormRefillSessions)
+        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user", "REFILL_SESSIONS="+sessions)
         out, err := cmd.CombinedOutput()
         stormRefillMu.Lock()
         if err != nil {
