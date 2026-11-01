@@ -35,3 +35,6 @@ pool/.wd-last
 # source backup files must never be tracked
 internal/zbridge/*.bak-*
 *.bak-2*
+pool/.refill.lock
+pool/.storm-alert-state
+pool/storm-alert.log

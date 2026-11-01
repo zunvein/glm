@@ -7,6 +7,7 @@ import (
     "io"
     "os"
     "os/exec"
+    "path/filepath"
     "sort"
     "strings"
     "bytes"
@@ -26,6 +27,23 @@ import (
 // only call sites the captcha path needs.
 // ============================================================================
 
+// tokenPickOrder is the ORDER BY clause used to pick the next device token.
+// Random by default (storm #3, 1 Nov): a storm flags ONE device identity, so
+// with a multi-identity pool an oldest-first walk marches straight into that
+// identity's block and burns it (up to maxTokenRetries tokens per failed
+// request) before ever reaching a healthy identity — the pool bleeds instead
+// of degrading. Random spreads the retry loop across identities, so a
+// partially flagged pool keeps serving. TOKEN_PICK=fifo restores the old
+// oldest-first order (env knob, so a rollback needs no rebuild).
+var tokenPickOrder = resolveTokenPickOrder(os.Getenv)
+
+func resolveTokenPickOrder(getenv func(string) string) string {
+    if strings.EqualFold(getenv("TOKEN_PICK"), "fifo") {
+        return "id"
+    }
+    return "RANDOM()"
+}
+
 func getNextToken() (string, bool) {
     var token string
     err := withTokenDB(func(h dbHandle) error {
@@ -33,7 +51,7 @@ func getNextToken() (string, bool) {
             logError("Database file not found: " + h.path)
             return err
         }
-        return h.db.QueryRow("SELECT token FROM tokens ORDER BY id LIMIT 1;").Scan(&token)
+        return h.db.QueryRow("SELECT token FROM tokens ORDER BY " + tokenPickOrder + " LIMIT 1;").Scan(&token)
     })
     if err != nil {
         if errors.Is(err, sql.ErrNoRows) {
@@ -482,6 +500,79 @@ var (
     stormRefillSessions = "3"
 )
 
+// PRE-MINTED STANDBY POOL (storm #3, 1 Nov) — recovering from a storm used to
+// cost a full browser mint, i.e. ~50 s of fail-fast 5xx for every caller while
+// refill.sh harvested. refill.sh now also stages a standby pool under its own
+// device identity and does NOT swap it in; a breaker trip swaps it in
+// synchronously (a pointer swap, no browser visit) and refill.sh restocks the
+// standby in the background. No standby ready => we fall back to the original
+// mint-then-swap path, so the worst case is exactly the old behaviour.
+var (
+    stormStandbyGlob     = "pool/tokens-standby-*.sqlite"
+    stormStandbyMu       sync.Mutex
+    stormStandbyUsed     = map[string]bool{} // already swapped in (never reuse)
+    stormStandbySwaps    int64
+    stormStandbyLastAt   time.Time
+    stormStandbyLastPath string
+    stormStandbyLastErr  string
+)
+
+// pickStandbyPath returns the newest standby pool that has not been swapped in
+// yet, or "" when none is ready. Standby filenames carry a UTC stamp, so a
+// plain reverse sort is newest-first.
+func pickStandbyPath() string {
+    matches, err := filepath.Glob(stormStandbyGlob)
+    if err != nil || len(matches) == 0 {
+        return ""
+    }
+    sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+    stormStandbyMu.Lock()
+    defer stormStandbyMu.Unlock()
+    for p := range stormStandbyUsed { // forget standbys that refill.sh GC'd
+        if _, err := os.Stat(p); err != nil {
+            delete(stormStandbyUsed, p)
+        }
+    }
+    for _, m := range matches {
+        if !stormStandbyUsed[m] {
+            return m
+        }
+    }
+    return ""
+}
+
+// swapStandbyNow swaps a pre-minted standby pool into the live slot, in
+// process, right now. Returns true when the live pool IS the standby (the
+// caller's fail-fast window is over), false when there was nothing to swap or
+// the swap was rejected (corrupt/stale file, another swap in flight).
+func swapStandbyNow() bool {
+    path := pickStandbyPath()
+    if path == "" {
+        return false
+    }
+    if err := swapDB(path); err != nil {
+        stormStandbyMu.Lock()
+        stormStandbyLastErr = err.Error()
+        stormStandbyMu.Unlock()
+        logError(fmt.Sprintf("[Captcha] standby swap failed (%s): %v - falling back to a fresh mint", path, err))
+        return false
+    }
+    // The HTTP swap handler resets these itself; the in-process path must do
+    // it too, otherwise the open breaker keeps failing requests for the rest
+    // of its cooldown even though the pool is already healthy again.
+    resetCaptchaBreaker()
+    clearCaptchaParamOverride()
+    stormStandbyMu.Lock()
+    stormStandbyUsed[path] = true
+    stormStandbySwaps++
+    stormStandbyLastAt = time.Now()
+    stormStandbyLastPath = path
+    stormStandbyLastErr = ""
+    stormStandbyMu.Unlock()
+    log.Printf("[Captcha] storm: standby pool swapped in instantly - %s (restocking in the background)", path)
+    return true
+}
+
 // spawnStormRefill fires refill.sh in a background goroutine so the request
 // path is never blocked by the (browser-visit) harvest. Single-flight: if a
 // refill already ran within stormRefillMinGap, this is a no-op; a rolling
@@ -489,6 +580,11 @@ var (
 // swapped in by refill.sh itself, and the swap resets the breaker, so the
 // next compute gets fresh device identities that Aliyun has not yet flagged.
 func spawnStormRefill() {
+    // Instant recovery first (free, and deliberately NOT budget-gated): if a
+    // pre-minted standby pool is ready, swapping it in ends the fail-fast
+    // window in milliseconds. The mint below then restocks for the next storm.
+    swapStandbyNow()
+
     now := time.Now()
     stormRefillMu.Lock()
     if now.Sub(stormRefillLast) < stormRefillMinGap {
@@ -636,6 +732,17 @@ func captchaStats() map[string]interface{} {
         "autoRefillBudgetUsed": inWindow,
         "autoRefillBudgetMax":  budgetMax,
         "autoRefillBudgetHits": budgetHits,
+    }
+    // Standby-pool readiness (1 Nov): standbyReady=false means the next storm
+    // falls back to the slow mint-then-swap recovery path.
+    stormStandbyMu.Lock()
+    standbySwaps := stormStandbySwaps
+    standbyLast := stormStandbyLastAt
+    stormStandbyMu.Unlock()
+    stats["standbyReady"] = pickStandbyPath() != ""
+    stats["standbySwaps"] = standbySwaps
+    if !standbyLast.IsZero() {
+        stats["standbyLastSwapAt"] = standbyLast.UTC().Format(time.RFC3339)
     }
     if !lastTrip.IsZero() {
         stats["lastStormAt"] = lastTrip.UTC().Format(time.RFC3339)
