@@ -653,6 +653,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
         "healthy":    healthy,
         "mode":       "direct",
         "tokenCount": tokenCount,
+        // Storm/captcha observability block (1 Nov): liveness semantics are
+        // unchanged — this only makes the captcha subsystem measurable
+        // (breaker state, compute outcomes, auto-refill budget, pool age)
+        // without journalctl. Watchdog scripts only read tokenCount.
+        "captcha": captchaStats(),
     })
 }
 

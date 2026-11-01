@@ -110,6 +110,10 @@ type dbState struct {
     countAt   time.Time
     countPath string // which db file the cached count belongs to
 
+    // swappedAt is when the ACTIVE pool was swapped/attached — pool
+    // freshness for /health's "captcha" block (guard: countMu).
+    swappedAt time.Time
+
     swaps uint64 // completed swaps (observability)
 }
 
@@ -217,6 +221,7 @@ func attachDB(db *sql.DB, path string) {
     s.active = dbHandle{db: db, path: path}
     s.mu.Unlock()
     invalidateTokenCount()
+    s.markSwapped()
     // Startup attach replaces nothing in a healthy process; if it does
     // (tests), drain politely rather than closing under a live reader.
     if old.db != nil && old.db != db {
@@ -291,6 +296,27 @@ func withTokenDB(fn func(h dbHandle) error) error {
 // ============================================================================
 // TOKEN COUNT (TTL-cached, /health)
 // ============================================================================
+
+// markSwapped stamps "now" as the moment the active pool was installed.
+// Called by attachDB (startup) and swapDB (hot-swap) so /health's "captcha"
+// block can report pool freshness (poolAgeSec).
+func (s *dbState) markSwapped() {
+    s.countMu.Lock()
+    s.swappedAt = time.Now()
+    s.countMu.Unlock()
+}
+
+// poolInfo returns the active pool's file path and when it was installed —
+// the pool-freshness pair served by /health's "captcha" block.
+func (s *dbState) poolInfo() (string, time.Time) {
+    s.mu.RLock()
+    p := s.active.path
+    s.mu.RUnlock()
+    s.countMu.Lock()
+    at := s.swappedAt
+    s.countMu.Unlock()
+    return p, at
+}
 
 // tokenCount returns the number of rows in the active `tokens` table, served
 // from the TTL cache when fresh. It returns -1 when the database cannot be
@@ -428,6 +454,7 @@ func swapDB(newPath string) error {
     s.swaps++
     s.mu.Unlock()
     invalidateTokenCount()
+    s.markSwapped()
 
     // Graceful drain: retire the old handle only after every in-flight
     // query using it has finished. New queries go to the new handle, so

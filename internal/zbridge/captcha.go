@@ -431,7 +431,19 @@ var (
     captchaBreakerMu       sync.Mutex
     captchaComputeFailures int
     captchaBreakerOpenAt   time.Time // zero = closed
+
+    // Cumulative observability counters (1 Nov) — surfaced by /health's
+    // "captcha" block so storm health is measurable without journalctl.
+    captchaComputeOK    int64
+    captchaComputeFail  int64
+    captchaBreakerTrips int64
+    captchaLastTripAt   time.Time
 )
+
+// spawnStormRefillHook is the test seam for the auto-refill trigger:
+// `go test` stubs it to a no-op so tripping the breaker never spawns a
+// REAL browser harvest from inside a test run.
+var spawnStormRefillHook = spawnStormRefill
 
 func captchaBreakerOpen() bool {
     captchaBreakerMu.Lock()
@@ -444,37 +456,83 @@ var (
     // overlapping refill.sh browser visits. refill.sh hot-swaps a fresh pool
     // via POST /sqlite, which resets the breaker (swapDB -> resetCaptchaBreaker),
     // so one refill during a storm is enough to unblock the next compute.
-    stormRefillMu       sync.Mutex
-    stormRefillLast     time.Time // last time we auto-reharvested, to rate-limit
-    stormRefillMinGap   = 90 * time.Second
-    stormRefillScript   = "pool/refill.sh"
+    stormRefillMu     sync.Mutex
+    stormRefillLast   time.Time // last time we auto-reharvested, to rate-limit
+    stormRefillMinGap = 90 * time.Second
+    stormRefillScript = "pool/refill.sh"
+
+    // Burn budget (1 Nov): if a pathological storm ALSO flags freshly
+    // minted identities, every refill comes back dead and the min-gap
+    // alone would loop browser visits ~40x/hour straight into the VPS.
+    // Cap the damage: at most stormRefillBudget auto-refills per rolling
+    // stormRefillBudgetWindow; beyond that we stand down and log.
+    stormRefillBudgetWindow = time.Hour
+    stormRefillBudget       = 3
+    stormRefillTimes        []time.Time
+    stormRefillCount        int64
+    stormRefillLastAt       time.Time
+    stormRefillLastErr      string
+    stormRefillBudgetHits   int64
+
+    // Identity diversification for storm mints (1 Nov): the storm hook
+    // asks refill.sh for this many minting sessions — each session is its
+    // own browser visit + device identity, so one Aliyun flag can no
+    // longer kill the whole pool at once. Timer/watchdog refills keep the
+    // default of 1 session (REFILL_SESSIONS unset).
+    stormRefillSessions = "3"
 )
 
 // spawnStormRefill fires refill.sh in a background goroutine so the request
 // path is never blocked by the (browser-visit) harvest. Single-flight: if a
-// refill already ran within stormRefillMinGap, this is a no-op. The freshly
-// minted pool is swapped in by refill.sh itself, and the swap resets the
-// breaker, so the next compute gets fresh device identities that Aliyun has
-// not yet flagged.
+// refill already ran within stormRefillMinGap, this is a no-op; a rolling
+// budget caps how many can ever run per hour. The freshly minted pool is
+// swapped in by refill.sh itself, and the swap resets the breaker, so the
+// next compute gets fresh device identities that Aliyun has not yet flagged.
 func spawnStormRefill() {
+    now := time.Now()
     stormRefillMu.Lock()
-    if time.Since(stormRefillLast) < stormRefillMinGap {
+    if now.Sub(stormRefillLast) < stormRefillMinGap {
         stormRefillMu.Unlock()
         return
     }
-    stormRefillLast = time.Now()
+    kept := stormRefillTimes[:0]
+    for _, t := range stormRefillTimes {
+        if now.Sub(t) < stormRefillBudgetWindow {
+            kept = append(kept, t)
+        }
+    }
+    stormRefillTimes = kept
+    if len(stormRefillTimes) >= stormRefillBudget {
+        stormRefillBudgetHits++
+        budget := stormRefillBudget
+        stormRefillMu.Unlock()
+        log.Printf("[Captcha] storm auto-refill budget exhausted (%d in the last hour) — standing down to protect the VPS", budget)
+        return
+    }
+    stormRefillTimes = append(stormRefillTimes, now)
+    stormRefillLast = now
+    stormRefillCount++
+    stormRefillLastAt = now
     stormRefillMu.Unlock()
 
-    log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh)")
+    log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh, %s sessions)", stormRefillSessions)
     go func() {
         cmd := exec.Command("/bin/sh", stormRefillScript)
         cmd.Dir = "/home/ec2-user/zai-api-dev"
-        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user")
+        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user", "REFILL_SESSIONS="+stormRefillSessions)
         out, err := cmd.CombinedOutput()
+        stormRefillMu.Lock()
         if err != nil {
+            msg := err.Error()
+            if len(msg) > 200 { // privacy: cap, never echo script output here
+                msg = msg[:200]
+            }
+            stormRefillLastErr = msg
+            stormRefillMu.Unlock()
             logError(fmt.Sprintf("[Captcha] storm auto-refill FAILED: %v out=%s", err, string(out)))
             return
         }
+        stormRefillMu.Unlock()
         log.Printf("[Captcha] storm auto-refill completed: %s", strings.TrimSpace(string(out)))
     }()
 }
@@ -482,6 +540,7 @@ func spawnStormRefill() {
 func recordCaptchaFailure() {
     captchaBreakerMu.Lock()
     captchaComputeFailures++
+    captchaComputeFail++
     // Re-arm on every storm burst: openAt stays in the past after a cooldown
     // expires, so "IsZero only" would let the breaker fire exactly once and
     // leave the following cycle unbounded (observed live 30 Okt: pool
@@ -491,6 +550,8 @@ func recordCaptchaFailure() {
         captchaBreakerOpenAt = time.Now().Add(captchaBreakerCooldown)
         captchaComputeFailures = 0
         tripped = true
+        captchaBreakerTrips++
+        captchaLastTripAt = time.Now()
         log.Printf("[Captcha] circuit breaker OPEN for %s after %d failed computes (token burn capped)",
             captchaBreakerCooldown, captchaBreakerThreshold)
     }
@@ -503,13 +564,14 @@ func recordCaptchaFailure() {
     // them ~10-30 min later. Trigger it exactly once per trip (single-flight
     // + rate-limited above).
     if tripped {
-        spawnStormRefill()
+        spawnStormRefillHook()
     }
 }
 
 func recordCaptchaSuccess() {
     captchaBreakerMu.Lock()
     defer captchaBreakerMu.Unlock()
+    captchaComputeOK++
     if !captchaBreakerOpenAt.IsZero() {
         log.Printf("[Captcha] circuit breaker CLOSED - captcha compute succeeded")
     }
@@ -522,6 +584,66 @@ func resetCaptchaBreaker() {
     defer captchaBreakerMu.Unlock()
     captchaComputeFailures = 0
     captchaBreakerOpenAt = time.Time{}
+}
+
+// captchaStats snapshots captcha-subsystem health for /health's "captcha"
+// block: breaker state, compute outcome counters, storm trip times,
+// auto-refill budget usage and active-pool freshness. Pure observability —
+// /health liveness semantics (status code, healthy, tokenCount) are
+// unchanged, so the watchdog scripts keep working untouched.
+func captchaStats() map[string]interface{} {
+    now := time.Now()
+
+    captchaBreakerMu.Lock()
+    openUntil := captchaBreakerOpenAt
+    consec := captchaComputeFailures
+    okCount := captchaComputeOK
+    badCount := captchaComputeFail
+    trips := captchaBreakerTrips
+    lastTrip := captchaLastTripAt
+    captchaBreakerMu.Unlock()
+
+    stormRefillMu.Lock()
+    refills := stormRefillCount
+    budgetHits := stormRefillBudgetHits
+    inWindow := len(stormRefillTimes)
+    budgetMax := stormRefillBudget
+    lastRefill := stormRefillLastAt
+    lastErr := stormRefillLastErr
+    stormRefillMu.Unlock()
+
+    state := "closed"
+    openFor := ""
+    if now.Before(openUntil) {
+        state = "open"
+        openFor = openUntil.Sub(now).Round(time.Second).String()
+    }
+    stats := map[string]interface{}{
+        "breaker":              state,
+        "breakerOpenFor":       openFor,
+        "breakerTrips":         trips,
+        "computeOK":            okCount,
+        "computeFail":          badCount,
+        "consecutiveFails":     consec,
+        "autoRefills":          refills,
+        "autoRefillBudgetUsed": inWindow,
+        "autoRefillBudgetMax":  budgetMax,
+        "autoRefillBudgetHits": budgetHits,
+    }
+    if !lastTrip.IsZero() {
+        stats["lastStormAt"] = lastTrip.UTC().Format(time.RFC3339)
+    }
+    if !lastRefill.IsZero() {
+        stats["lastAutoRefillAt"] = lastRefill.UTC().Format(time.RFC3339)
+    }
+    if lastErr != "" {
+        stats["lastAutoRefillError"] = lastErr
+    }
+    if path, at := globalDBState.poolInfo(); path != "" && !at.IsZero() {
+        stats["poolPath"] = path
+        stats["poolAgeSec"] = int64(now.Sub(at).Round(time.Second).Seconds())
+    }
+    return stats
 }
 
 func computeFinalPayload() string {

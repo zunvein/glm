@@ -20,11 +20,65 @@ TS=$(date -u +%FT%TZ)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 LIVE=$POOL/tokens-live-$STAMP.sqlite
 
-# 1) mint fresh device tokens (batch 240, tuned 31 Okt) (headful browser via DISPLAY=:1 from the unit)
-/home/ec2-user/zai-api-dev/token-collector --no-tui --tokens 240 >> "$LOG" 2>&1
-if [ $? -ne 0 ]; then
-    echo "$TS MINT FAILED" >> "$LOG"
-    exit 1
+# 1) mint fresh device tokens (batch 240, tuned 31 Okt) (headful browser via
+#    DISPLAY=:1 from the unit). REFILL_SESSIONS (set by the bridge's storm
+#    hook, 1 Nov) mints from that many SEPARATE browser sessions — each
+#    session is its own device identity, so a single Aliyun flag can no
+#    longer kill the whole pool mid-storm. Timer/watchdog refills keep the
+#    default (1 session, single browser visit) exactly as before.
+SESSIONS=${REFILL_SESSIONS:-1}
+TOTAL=${REFILL_TOKENS:-240}
+if [ "$SESSIONS" -gt 1 ]; then
+    PER=$(( TOTAL / SESSIONS ))
+    [ "$PER" -lt 1 ] && PER=1
+    STAGE=$(mktemp -d "$POOL/.stage.XXXXXX")
+    echo "$TS multi-session mint: $SESSIONS sessions x $PER tokens" >> "$LOG"
+    i=1
+    while [ "$i" -le "$SESSIONS" ]; do
+        if ! (cd "$STAGE" && /home/ec2-user/zai-api-dev/token-collector --no-tui --tokens "$PER" >> "$LOG" 2>&1); then
+            echo "$TS MINT FAILED (session $i/$SESSIONS)" >> "$LOG"
+            rm -rf "$STAGE"
+            exit 1
+        fi
+        mv -f "$STAGE/tokens.sqlite" "$STAGE/session-$i.sqlite"
+        i=$(( i + 1 ))
+    done
+    # merge the per-session pools (distinct device identities) into one db.
+    # python's sqlite3 stdlib: WAL checkpoint on close leaves a clean
+    # standalone file, and the unique LIVE name below keeps v4's guarantee
+    # (no stale -wal can ever haunt the swap target).
+    if python3 - "$STAGE/merged.sqlite" "$STAGE"/session-*.sqlite <<'PYEOF' >> "$LOG" 2>&1
+import sqlite3, sys
+out, srcs = sys.argv[1], sys.argv[2:]
+db = sqlite3.connect(out)
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("CREATE TABLE tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
+n = 0
+for p in srcs:
+    s = sqlite3.connect(p)
+    for (tok,) in s.execute("SELECT token FROM tokens"):
+        db.execute("INSERT INTO tokens(token) VALUES (?)", (tok,))
+        n += 1
+    s.close()
+db.commit()
+db.close()
+print("merge OK: %d tokens from %d sessions" % (n, len(srcs)))
+PYEOF
+    then
+        :
+    else
+        echo "$TS MERGE FAILED" >> "$LOG"
+        rm -rf "$STAGE"
+        exit 1
+    fi
+    mv -f "$STAGE/merged.sqlite" tokens.sqlite
+    rm -rf "$STAGE"
+else
+    /home/ec2-user/zai-api-dev/token-collector --no-tui --tokens "$TOTAL" >> "$LOG" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "$TS MINT FAILED" >> "$LOG"
+        exit 1
+    fi
 fi
 
 # 2) stage the fresh pool under a UNIQUE name. The collector has exited and
@@ -63,4 +117,7 @@ fi
 ls -1t "$POOL"/tokens-live-*.sqlite 2>/dev/null | tail -n +5 | while IFS= read -r f; do
     rm -f "$f" "$f-wal" "$f-shm"
 done
+# stale staging dirs from a killed multi-session run (never blocks a live
+# one: storm refills are single-flight and spaced >= 90 s apart)
+rm -rf "$POOL"/.stage.* 2>/dev/null
 exit 0
