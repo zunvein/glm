@@ -638,6 +638,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
     session.mu.Lock()
     healthy := session.Initialized
     session.mu.Unlock()
+    // With configured ZAI_TOKEN(S) there is no guest handshake to wait for:
+    // the next request initialises the session itself. Rotation after a
+    // capacity error clears Initialized on purpose, so a configured bridge
+    // must not report itself down for that.
+    if !healthy && (len(config.ZaiTokens) > 0 || config.ZaiToken != "") {
+        healthy = true
+    }
 
     // Real-time device-token count from the active tokens.sqlite, served
     // from a TTL cache (TOKEN_COUNT_TTL_MS, default 5 s) so a health probe
