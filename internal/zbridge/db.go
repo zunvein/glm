@@ -327,20 +327,20 @@ func (s *dbState) tokenCount() int64 {
     h := s.active
     s.mu.RUnlock()
 
+    // Freshness check and value read share ONE critical section: with two
+    // separate locks, invalidateTokenCount() could land in between and the
+    // reader would return the -1 sentinel for a perfectly healthy database.
     s.countMu.Lock()
-    fresh := h.db != nil &&
+    if h.db != nil &&
         !s.countAt.IsZero() &&
         time.Since(s.countAt) < tokenCountCacheTTL &&
         s.countPath == h.path &&
-        s.count >= 0
-    s.countMu.Unlock()
-
-    if fresh {
-        s.countMu.Lock()
+        s.count >= 0 {
         c := s.count
         s.countMu.Unlock()
         return c
     }
+    s.countMu.Unlock()
 
     if h.db == nil {
         return -1

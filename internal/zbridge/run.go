@@ -99,7 +99,7 @@ func Run() {
 
     addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 
-    tokenPadded := fmt.Sprintf("%-44s", config.Auth.Token)
+    tokenPadded := fmt.Sprintf("%-44s", maskSecret(config.Auth.Token))
     fmt.Printf(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║           Z.AI Direct Bridge Server Started                   ║

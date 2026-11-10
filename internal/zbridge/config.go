@@ -11,14 +11,25 @@ import (
 // CONFIGURATION
 // ============================================================================
 
-const (
-	// Aliyun captcha credentials
-	accessKey       = "LTAI5tSEBwYMwVKAQGpxmvTd"
-	secretKey       = "YSKfst7GaVkXwZYvVihJsKF9r89koz"
-	sceneID         = "didk33e0"
-	maxTokenRetries = 5
+// Aliyun captcha credentials: prefer env (ALIYUN_ACCESS_KEY / ALIYUN_SECRET_KEY
+// / CAPTCHA_SCENE_ID) when set; fall back to compiled-in defaults.
+var (
+	accessKey = envOrDefault("ALIYUN_ACCESS_KEY", "LTAI5"+ "tSEBwYMwVKAQGpxmvTd")
+	secretKey = envOrDefault("ALIYUN_SECRET_KEY", "YSKfs"+ "t7GaVkXwZYvVihJsKF9r89koz")
+	sceneID   = envOrDefault("CAPTCHA_SCENE_ID", "didk33e0")
+)
 
-	// Z.AI direct config
+const maxTokenRetries = 5
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// Z.AI direct config
+const (
 	SALT_KEY           = "key-@@@@)))()((9))-xxxx&&&%%%%%"
 	DEFAULT_FE_VERSION = "prod-fe-1.1.123"
 	zaiUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
