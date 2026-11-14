@@ -1,6 +1,19 @@
 #!/bin/sh
-# glm-bridge token-pool refill v6 (1 Nov, storm #3) — mint fresh batch(es) ->
-# hot-swap the live pool into the running bridge (NO service restart).
+# glm-bridge token-pool refill v7 (14 Nov, migration-proof): mint fresh
+# batch(es) -> hot-swap the live pool into the running bridge (NO service
+# restart).
+#
+# v7 changes: every path is now derived from THIS script's location or from
+# environment variables — no hardcoded /home/<user> anywhere. The bridge
+# spawns this script with cwd = bridge dir (ZAI_HOME or the process working
+# directory), so $ZAI_HOME (or $PWD as fallback) resolves everything:
+#   ZAI_HOME            bridge/deployment dir (auto-detected from cwd if unset)
+#   BRIDGE_URL          bridge base URL      (default http://127.0.0.1:3012)
+#   REFILL_SESSIONS     minting sessions      (default 3)
+#   REFILL_TOKENS      tokens per live pool  (default 240)
+#   REFILL_STANDBY_TOKENS  tokens per standby (default 240)
+# The swapenv file (AUTH_TOKEN, PORT) is read from $ZAI_HOME/.swapenv when
+# present; BRIDGE_URL/BRIDGE_AUTH_TOKEN env vars take precedence.
 #
 # v6 changes (storm #3: a 1-minute-old single-identity pool got flagged and the
 # recovery cost ~50 s of fail-fast 5xx while refill.sh harvested):
@@ -22,7 +35,13 @@
 #     the freshly staged file (ghost decay 120->83->47->3->0 in swap.log); a
 #     unique name makes that impossible. All outcomes go to swap.log.
 set -u
-POOL=/home/ec2-user/zai-api-dev/pool
+# Resolve the deployment dir: ZAI_HOME wins, else assume the caller set the
+# cwd to the bridge dir (the bridge always does; humans usually run
+# `sh pool/refill.sh` from the checkout root, which is the same dir).
+ZAI_HOME=${ZAI_HOME:-$(pwd)}
+POOL=$ZAI_HOME/pool
+BRIDGE_URL=${BRIDGE_URL:-http://127.0.0.1:${PORT:-3012}}
+BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN:-}
 # Concurrency guard (1 Nov): one browser-visit harvest at a time; a second
 # caller exits cleanly because the in-flight refill produces the same fresh pool.
 exec 9>"$POOL/.refill.lock"
@@ -30,8 +49,8 @@ if ! flock -n 9; then
     echo "$(date -u +%FT%TZ) REFILL BUSY - another refill in flight, standing down" >> "$POOL/swap.log"
     exit 0
 fi
-REPO_LINK=/home/ec2-user/zai-api-dev/tokens.sqlite
-COLLECTOR=/home/ec2-user/zai-api-dev/token-collector
+REPO_LINK=$ZAI_HOME/tokens.sqlite
+COLLECTOR=$ZAI_HOME/token-collector
 cd "$POOL" || exit 1
 LOG=$POOL/swap.log
 TS=$(date -u +%FT%TZ)
@@ -105,11 +124,12 @@ fi
 ln -sfn "pool/tokens-live-$STAMP.sqlite" "$REPO_LINK"
 
 # hot-swap it into the running bridge (3 attempts, fail-loud, logged)
-. /home/ec2-user/zai-api-dev/.swapenv
+[ -n "$BRIDGE_AUTH_TOKEN" ] || . "$ZAI_HOME/.swapenv"
+BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN:-$AUTH_TOKEN}
 i=1
 SWAPRES=""
 while [ $i -le 3 ]; do
-    SWAPRES=$(curl -sf -m 30 -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H "Content-Type: application/json" -d "{\"db_path\":\"$LIVE\"}" http://127.0.0.1:3012/sqlite)
+    SWAPRES=$(curl -sf -m 30 -X POST -H "Authorization: Bearer $BRIDGE_AUTH_TOKEN" -H "Content-Type: application/json" -d "{\"db_path\":\"$LIVE\"}" "$BRIDGE_URL/sqlite")
     if [ -n "$SWAPRES" ]; then
         echo "$TS SWAP OK -> $(basename "$LIVE"): $SWAPRES" >> "$LOG"
         break
@@ -127,7 +147,7 @@ fi
 #    never delete the pool the bridge is serving right now — after a storm that
 #    is a standby file. The symlink resolves to the newest live generation, so
 #    a manual restart can never land on a GC'd file.
-ACTIVE=$(curl -s -m 5 http://127.0.0.1:3012/health 2>/dev/null \
+ACTIVE=$(curl -s -m 5 "$BRIDGE_URL/health" 2>/dev/null \
     | python3 -c 'import sys,json;print(json.load(sys.stdin).get("captcha",{}).get("poolPath",""))' 2>/dev/null)
 ls -1t "$POOL"/tokens-live-*.sqlite 2>/dev/null | tail -n +5 | while IFS= read -r f; do
     if [ -n "$ACTIVE" ] && [ "$f" = "$ACTIVE" ]; then continue; fi

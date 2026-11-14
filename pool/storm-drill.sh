@@ -8,22 +8,25 @@
 # Bounded by design: bogus tokens burn nothing of value, and the worst case is
 # the same mint-then-swap recovery a real storm already gets today.
 set -u
-cd /home/ec2-user/zai-api-dev || exit 1
-. /home/ec2-user/zai-api-dev/.swapenv
-AUTHHDR="Authorization: Bearer $AUTH_TOKEN"
-KEY=$(cat /home/ec2-user/workers/.glmkey)
+ZAI_HOME=${ZAI_HOME:-$(pwd)}
+BRIDGE_URL=${BRIDGE_URL:-http://127.0.0.1:${PORT:-3012}}
+GLM_KEY_FILE=${GLM_KEY_FILE:-.glmkey}
+cd "$ZAI_HOME" || exit 1
+[ -n "${BRIDGE_AUTH_TOKEN:-}" ] || . "$ZAI_HOME/.swapenv"
+AUTHHDR="Authorization: Bearer ${BRIDGE_AUTH_TOKEN:-$AUTH_TOKEN}"
+KEY=$(cat "$GLM_KEY_FILE")
 BOGUS=/tmp/drill-bogus-$$.sqlite
 
 state() {
-    curl -s -m 5 http://127.0.0.1:3012/health | python3 -c 'import sys,json
+    curl -s -m 5 "$BRIDGE_URL/health" | python3 -c 'import sys,json
 d=json.load(sys.stdin); c=d["captcha"]
 print("breaker=%s trips=%s standbyReady=%s standbySwaps=%s poolPath=%s tokenCount=%s" % (
     c["breaker"], c["breakerTrips"], c["standbyReady"], c["standbySwaps"], c["poolPath"], d["tokenCount"]))'
 }
 
 echo "=== BEFORE ==="; state
-PREV_POOL=$(curl -s -m 5 http://127.0.0.1:3012/health | python3 -c 'import sys,json;print(json.load(sys.stdin)["captcha"]["poolPath"])')
-if ! curl -s -m 5 http://127.0.0.1:3012/health | python3 -c 'import sys,json;sys.exit(0 if json.load(sys.stdin)["captcha"]["standbyReady"] else 1)'; then
+PREV_POOL=$(curl -s -m 5 "$BRIDGE_URL/health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["captcha"]["poolPath"])')
+if ! curl -s -m 5 "$BRIDGE_URL/health" | python3 -c 'import sys,json;sys.exit(0 if json.load(sys.stdin)["captcha"]["standbyReady"] else 1)'; then
     echo "ABORT: standby belum siap — drill ini bakal ngukur jalur mint yang lambat, bukan jalur standby."
     exit 1
 fi
@@ -39,12 +42,12 @@ print("bogus pool: 50 token palsu")
 PY
 
 echo "--- swap bogus pool ke bridge LIVE ---"
-curl -s -X POST -H "$AUTHHDR" -H "Content-Type: application/json" -d "{\"db_path\":\"$BOGUS\"}" http://127.0.0.1:3012/sqlite; echo
+curl -s -X POST -H "$AUTHHDR" -H "Content-Type: application/json" -d "{\"db_path\":\"$BOGUS\"}" "$BRIDGE_URL/sqlite"; echo
 SINCE=$(date -u '+%Y-%m-%d %H:%M:%S')
 
 for i in 1 2 3; do
     echo "--- request #$i (harus gagal: token palsu) ---"
-    curl -s -m 60 -X POST http://127.0.0.1:3012/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+    curl -s -m 60 -X POST "$BRIDGE_URL/v1/chat/completions" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
       -d '{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -c 160; echo
     sleep 1
 done
@@ -54,9 +57,9 @@ echo "=== RECOVERY LOG ==="
 journalctl -u zai-api-dev --since "$SINCE" --no-pager | grep -E "standby pool swapped in instantly|circuit breaker OPEN|storm detected|storm auto-refill" | tail -6
 
 echo "=== REQUEST #4 (harus SUKSES) ==="
-OUT=$(curl -s -m 90 -X POST http://127.0.0.1:3012/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"say OK"}]}')
+OUT=$(curl -s -m 90 -X POST "$BRIDGE_URL/v1/chat/completions" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"say OK"}]}')
 echo "DONE=$(echo "$OUT" | grep -c 'data: \[DONE\]') ERR=$(echo "$OUT" | grep -ci 'error')"
 
 echo "=== ROLLBACK (kalau perlu, token dibaca dari .swapenv) ==="
-echo ". .swapenv; curl -s -X POST -H \"Authorization: Bearer \$AUTH_TOKEN\" -H 'Content-Type: application/json' -d '{\"db_path\":\"$PREV_POOL\"}' http://127.0.0.1:3012/sqlite"
+echo ". .swapenv; curl -s -X POST -H \"Authorization: Bearer \$AUTH_TOKEN\" -H 'Content-Type: application/json' -d '{\"db_path\":\"$PREV_POOL\"}' \"\$BRIDGE_URL/sqlite\"
 rm -f "$BOGUS"

@@ -7,14 +7,17 @@
 # Reuses glm-watch's notify path (TG_TOKEN in workers/.tgtoken, same chat,
 # same zunbot /dbg kill-switch) so there is exactly one alerting convention.
 set -u
-D=/home/ec2-user/zai-api-dev/pool
+ZAI_HOME=${ZAI_HOME:-$(pwd)}
+D=$ZAI_HOME/pool
+BRIDGE_URL=${BRIDGE_URL:-http://127.0.0.1:${PORT:-3012}}
+TG_TOKEN_FILE=${TG_TOKEN_FILE:-.tgtoken}
 LOG=$D/storm-alert.log
 STATE=$D/.storm-alert-state
-CHAT=1282949142
+CHAT=${TG_CHAT:-1282949142}
 DEDUPE=300          # seconds between two alerts
 STANDBY_GRACE=1800  # how long "no standby ready" may persist before alerting
 
-H=$(curl -s -m 5 http://127.0.0.1:3012/health 2>/dev/null)
+H=$(curl -s -m 5 "$BRIDGE_URL/health" 2>/dev/null)
 # Bridge unreachable => not this script's job (glm-watch alerts on edge/TLS).
 [ -z "$H" ] && exit 0
 
@@ -57,7 +60,7 @@ elif [ "$SBREADY" = 0 ] && [ $(( MISSING * 120 )) -ge "$STANDBY_GRACE" ]; then
 fi
 
 if [ -n "$MSG" ] && [ $(( NOW - PLAST )) -gt "$DEDUPE" ]; then
-    TOK=$(sed -n 's/^TG_TOKEN=//p' /home/ec2-user/workers/.tgtoken 2>/dev/null | head -1 | tr -d '\r')
+    TOK=$(sed -n 's/^TG_TOKEN=//p' "$TG_TOKEN_FILE" 2>/dev/null | head -1 | tr -d '\r')
     if [ -n "$TOK" ]; then
         DBG=$(curl -sS --max-time 8 https://zunbot.zunreth.workers.dev/dbg 2>/dev/null)
         if [ "$DBG" = "1" ]; then

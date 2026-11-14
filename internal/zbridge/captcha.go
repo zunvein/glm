@@ -478,6 +478,11 @@ var (
     stormRefillLast   time.Time // last time we auto-reharvested, to rate-limit
     stormRefillMinGap = 90 * time.Second
     stormRefillScript = "pool/refill.sh"
+    // stormRefillDir is the cwd for refill.sh. ZAI_HOME overrides it for
+    // deployments where the working directory is not the bridge dir;
+    // empty = inherit the process working directory (matches `./zai-api`
+    // run from a plain checkout). No hardcoded /home/<user> paths.
+    stormRefillDir = os.Getenv("ZAI_HOME")
 
     // Burn budget (1 Nov): if a pathological storm ALSO flags freshly
     // minted identities, every refill comes back dead and the min-gap
@@ -620,9 +625,15 @@ func spawnStormRefill() {
 
     log.Printf("[Captcha] storm detected — auto-refilling fresh device-token pool (refill.sh, %s sessions)", sessions)
     go func() {
-        cmd := exec.Command("/bin/sh", script)
-        cmd.Dir = "/home/ec2-user/zai-api-dev"
-        cmd.Env = append(os.Environ(), "DISPLAY=:1", "HOME=/home/ec2-user", "REFILL_SESSIONS="+sessions)
+        // REFILL_DISPLAY defaults to :1 (legacy Xvfb display used on the
+    // original deployment); explicit empty string means "no display".
+    refillDisplay := os.Getenv("REFILL_DISPLAY")
+    if _, ok := os.LookupEnv("REFILL_DISPLAY"); !ok {
+        refillDisplay = ":1"
+    }
+    cmd := exec.Command("/bin/sh", script)
+    cmd.Dir = stormRefillDir
+    cmd.Env = append(os.Environ(), "DISPLAY="+refillDisplay, "REFILL_SESSIONS="+sessions)
         out, err := cmd.CombinedOutput()
         stormRefillMu.Lock()
         if err != nil {
