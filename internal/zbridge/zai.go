@@ -542,13 +542,11 @@ func sendToZAIStream(prompt string, opts struct {
 		// web-search toggle upstream (issue #42).
 		featuresPayload["web_search"] = false
 
-		// Z.AI killed the "glm-5.3-flash" id in the fe-1.1.122 deploy
-		// (2026-10-28); GLM-5.3-Flash is served as "x-preview-l" now.
-		// Alias the dead id so older clients keep working (500 otherwise).
-		upstreamModel := opts.Model
-		if upstreamModel == "glm-5.3-flash" {
-			upstreamModel = "x-preview-l"
-		}
+		// Retired Z.AI ids are aliased to the live upstream id: a delisted
+		// model comes back as a bare 500 "Internal Server Error", which looks
+		// exactly like an upstream outage, so older clients would silently
+		// break. See legacyModelAlias.
+		upstreamModel := legacyModelAlias(opts.Model)
 		// Z.AI requires a client-generated message id on every completion
 		// (upstream 400 MISSING_MESSAGE_ID otherwise, observed 2026-10-28).
 		// Same client-UUID pattern as chat_id — mint one per request.
@@ -1281,4 +1279,22 @@ func streamSSEResponse(body io.Reader, ch chan<- ZAIResult, requestId string) er
 
 	flush(true)
 	return scanner.Err()
+}
+
+// retiredModels maps ids Z.AI no longer serves to the id that replaced them.
+// Upstream answers a delisted id with a bare 500 "Internal Server Error"
+// (verified 2026-11-17: glm-4.5/4.6/5 all 500, glm-4.7 and glm-5.3 fine), so
+// without an alias an old client cannot tell a dead model from an outage.
+var retiredModels = map[string]string{
+	"glm-5.3-flash": "x-preview-l", // killed in fe-1.1.122 (2026-10-28)
+	"glm-4.5":       "glm-5.3",     // delisted, 500 as of 2026-11-17
+	"glm-4.6":       "glm-5.3",
+	"glm-5":         "glm-5.3",
+}
+
+func legacyModelAlias(model string) string {
+	if live, ok := retiredModels[model]; ok {
+		return live
+	}
+	return model
 }
