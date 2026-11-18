@@ -68,13 +68,23 @@ STAGE=$(mktemp -d "$POOL/.stage.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 
 # Headed Chromium needs an X server. The bridge spawns this script from a
-# systemd unit that carries no DISPLAY, so mints used to die with
-# "launched a headed browser without having a XServer running" and the pool
-# never refreshed (18 Nov: 5 refills, all exit 1). Reuse a running display
-# when there is one, else let xvfb-run spin up a throwaway one.
-if [ -z "${DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X99 ]; then
-    DISPLAY=:99
-    export DISPLAY
+# systemd unit and injects REFILL_DISPLAY (historically :1, which no longer
+# exists on this host), so a mint used to die with "launched a headed browser
+# without having a XServer running" and the pool never refreshed (18 Nov: 5
+# refills, all exit 1). Keep a DISPLAY only when its socket is really there,
+# otherwise let xvfb-run spin up a throwaway server for the mint.
+display_usable() { # $1 = display, e.g. :99
+    d=${1#:}
+    [ -n "$d" ] && [ -S "/tmp/.X11-unix/X$d" ]
+}
+if [ -n "${DISPLAY:-}" ] && ! display_usable "$DISPLAY"; then
+    echo "$TS DISPLAY=$DISPLAY has no X socket - ignoring it" >> "$LOG"
+    unset DISPLAY
+fi
+if [ -z "${DISPLAY:-}" ]; then
+    for cand in :99 :0 :1; do
+        if display_usable "$cand"; then DISPLAY=$cand; export DISPLAY; break; fi
+    done
 fi
 mint_into_stage() { # $1 = token count
     if [ -n "${DISPLAY:-}" ]; then
