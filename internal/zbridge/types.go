@@ -104,6 +104,7 @@ type VerifyCaptchaResponse struct {
 	Success bool `json:"Success"`
 	Result  struct {
 		VerifyResult  bool   `json:"VerifyResult"`
+		VerifyCode    string `json:"VerifyCode"`
 		SecurityToken string `json:"securityToken"`
 		CertifyID     string `json:"certifyId"`
 	} `json:"Result"`

@@ -67,10 +67,27 @@ PER=$(( TOTAL / SESSIONS ))
 STAGE=$(mktemp -d "$POOL/.stage.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 
+# Headed Chromium needs an X server. The bridge spawns this script from a
+# systemd unit that carries no DISPLAY, so mints used to die with
+# "launched a headed browser without having a XServer running" and the pool
+# never refreshed (18 Nov: 5 refills, all exit 1). Reuse a running display
+# when there is one, else let xvfb-run spin up a throwaway one.
+if [ -z "${DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X99 ]; then
+    DISPLAY=:99
+    export DISPLAY
+fi
+mint_into_stage() { # $1 = token count
+    if [ -n "${DISPLAY:-}" ]; then
+        ( cd "$STAGE" && exec "$COLLECTOR" --no-tui --tokens "$1" ) >> "$LOG" 2>&1
+    else
+        ( cd "$STAGE" && exec xvfb-run -a -s "-screen 0 1280x720x24" "$COLLECTOR" --no-tui --tokens "$1" ) >> "$LOG" 2>&1
+    fi
+}
+
 echo "$TS mint: live $SESSIONS session(s) x $PER tokens" >> "$LOG"
 i=1
 while [ "$i" -le "$SESSIONS" ]; do
-    if ! (cd "$STAGE" && "$COLLECTOR" --no-tui --tokens "$PER" >> "$LOG" 2>&1); then
+    if ! mint_into_stage "$PER"; then
         echo "$TS MINT FAILED (live session $i/$SESSIONS)" >> "$LOG"
         exit 1
     fi
@@ -107,7 +124,7 @@ fi
 # 2) stage the standby pool: one more browser visit = one more device identity,
 #    minted NOW so a storm can swap it in instantly. Best-effort by design — a
 #    standby failure must never block the live pool swap below.
-if (cd "$STAGE" && "$COLLECTOR" --no-tui --tokens "${REFILL_STANDBY_TOKENS:-240}" >> "$LOG" 2>&1); then
+if mint_into_stage "${REFILL_STANDBY_TOKENS:-240}"; then
     mv -f "$STAGE/tokens.sqlite" "$STANDBY"
     echo "$TS standby staged: $(basename "$STANDBY")" >> "$LOG"
 else

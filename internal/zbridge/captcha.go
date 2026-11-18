@@ -423,7 +423,12 @@ func verifyCaptcha(certifyID, dataValue, deviceToken string) (string, error) {
         }
         logError("VerifyCaptchaV3 succeeded but securityToken/certifyId empty for deviceToken=" + deviceToken)
     } else if respJSON.Success {
-        logError("deviceToken failed verification (VerifyResult=false): " + deviceToken)
+        // VerifyCode F001 = Aliyun risk policy rejected the request
+        // ("suspected attack", help.aliyun.com captcha 2.0 client codes).
+        // logError only prints under --verbose, so a storm used to surface as
+        // a silent "empty payload"; keep this one loud.
+        log.Printf("[Captcha] verify rejected: VerifyCode=%s deviceToken=%s",
+            respJSON.Result.VerifyCode, maskSecret(deviceToken))
     } else {
         logError("VerifyCaptchaV3 request unsuccessful for deviceToken=" + deviceToken + " response=" + resp)
     }
